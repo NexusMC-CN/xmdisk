@@ -1,0 +1,4 @@
+# 统一 LF：开发在 Windows、部署在 Linux，行尾混用是排障噪音源
+* text=auto eol=lf
+*.png binary
+*.jpg binary
