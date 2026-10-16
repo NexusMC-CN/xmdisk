@@ -27,9 +27,11 @@ go test ./...
 
 ## 当前状态
 
-存储内核：Put/Get/Stat/Delete/Mkdir/Rmdir/Move/SetAttrs/List、桶与配额、
-oplog（同事务）、内容寻址分块去重、readOnly、GC（标记-清扫 + 从节点
-ack 门控 + 超时会话清理）。
-复制（repl）：主端 oplog/快照/blob（墓碑感知）/ack/register 端点；
-从端拉取-回放-补 blob-上报，落后超限自动快照重建（含 blob 全量补齐）。
-下一步：Multipart + S3 适配层 → cmd/main + admin API → SFTP/WebDAV。
+存储内核：Put/Get/Stat/Delete/Mkdir/Rmdir/Move/SetAttrs/List、Multipart 五操作、
+桶与配额（含 pending 门控）、oplog（同事务）、内容寻址分块去重、readOnly、
+GC（标记-清扫 + 从节点 ack 门控 + 超时会话清理）。
+复制（repl）：主端 oplog/快照/blob（墓碑感知）/ack/register；从端拉取-回放-补
+blob-上报，落后超限自动快照重建（含 blob 全量补齐）；凭据密文复制。
+S3 适配层：SigV4（头部 + presign + aws-chunked）、对象全操作、条件请求、Range、
+ListV2/v1、multipart 全端点、多对象删除、桶级凭据鉴权、D017 错误映射。
+下一步：cmd/main + admin API（serve/sync/promote，灾备 runbook 执行面）→ SFTP → WebDAV → 鉴权补全。

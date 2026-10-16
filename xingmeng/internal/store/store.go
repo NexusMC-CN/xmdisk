@@ -38,9 +38,11 @@ type Config struct {
 	SmallThreshold      int64
 	ChunkSize           int64
 	MaxObjectSize       int64
+	MultipartMaxSize    int64         // multipart 对象上限（默认 1TB，docs/01）
 	GCInterval          time.Duration // 标记-清扫周期（默认 1h）
 	GCGrace             time.Duration // trash 宽限期（默认 48h，docs/05 gc_grace）
 	MultipartAbortAfter time.Duration // multipart 会话超时清理（默认 168h）
+	KEK                 []byte        // 凭据主密钥（配置层从环境变量注入；空 = 凭据面不可用，99-D009）
 }
 
 type Store struct {
@@ -74,6 +76,9 @@ func Open(cfg Config) (*Store, error) {
 	}
 	if cfg.MultipartAbortAfter <= 0 {
 		cfg.MultipartAbortAfter = 168 * time.Hour
+	}
+	if cfg.MultipartMaxSize <= 0 {
+		cfg.MultipartMaxSize = 1 << 40 // 1TB（docs/01 设计上限）
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, err

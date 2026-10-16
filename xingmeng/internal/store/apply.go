@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,9 +120,23 @@ func applyOpTx(ctx context.Context, t *meta.Tx, op meta.Op) error {
 		}
 		return nil
 
-	case meta.OpCredPut, meta.OpCredDelete:
-		// 凭据 API 尚未实现；op 照常入日志，状态变更随 creds 面落地补齐
-		return nil
+	case meta.OpCredPut:
+		var p credPutPayload
+		if err := json.Unmarshal([]byte(op.Payload), &p); err != nil {
+			return badPayload(op, err)
+		}
+		enc, err := base64.StdEncoding.DecodeString(p.SecretEnc)
+		if err != nil {
+			return badPayload(op, err)
+		}
+		return t.InsertCred(p.AccessKey, enc, p.Bucket, op.TsNs)
+
+	case meta.OpCredDelete:
+		var p credDeletePayload
+		if err := json.Unmarshal([]byte(op.Payload), &p); err != nil {
+			return badPayload(op, err)
+		}
+		return t.DeleteCred(p.AccessKey)
 
 	default:
 		return fmt.Errorf("%w: unknown op type %q (newer master?)", errs.ErrInternal, op.Type)

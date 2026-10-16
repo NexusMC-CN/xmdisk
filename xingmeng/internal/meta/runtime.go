@@ -2,6 +2,10 @@ package meta
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+
+	"xingmeng/internal/errs"
 )
 
 // ---- 桶列举（GC 标记用）----
@@ -94,6 +98,28 @@ ON CONFLICT(upload_id, part_no) DO UPDATE SET sha256 = excluded.sha256, size = e
 	return err
 }
 
+// Tx 侧变体（MpPut 在配额同事务内记账用）。
+func (t *Tx) InsertUploadPart(uploadID string, partNo int, sha string, size int64, etag string) error {
+	_, err := t.tx.Exec(
+		`INSERT INTO upload_parts(upload_id, part_no, sha256, size, etag) VALUES(?, ?, ?, ?, ?)
+ON CONFLICT(upload_id, part_no) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, etag = excluded.etag`,
+		uploadID, partNo, sha, size, etag)
+	return err
+}
+
+func (t *Tx) GetUploadPart(uploadID string, partNo int) (*PartRow, error) {
+	row := t.tx.QueryRow(
+		`SELECT part_no, sha256, size, etag FROM upload_parts WHERE upload_id = ? AND part_no = ?`, uploadID, partNo)
+	var p PartRow
+	if err := row.Scan(&p.PartNo, &p.Sha256, &p.Size, &p.ETag); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
 // ListStaleUploads 返回创建时间早于 olderThanNs 的会话。
 func (d *DB) ListStaleUploads(ctx context.Context, olderThanNs int64) ([]UploadRow, error) {
 	rows, err := d.db.QueryContext(ctx,
@@ -113,6 +139,57 @@ func (d *DB) ListStaleUploads(ctx context.Context, olderThanNs int64) ([]UploadR
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// GetUpload 未命中返回 ErrUploadNotFound。
+func (d *DB) GetUpload(ctx context.Context, uploadID string) (*UploadRow, error) {
+	row := d.db.QueryRowContext(ctx,
+		`SELECT upload_id, bucket, key, meta_json, created_at FROM uploads WHERE upload_id = ?`, uploadID)
+	var u UploadRow
+	var key []byte
+	if err := row.Scan(&u.UploadID, &u.Bucket, &key, &u.MetaJSON, &u.CreatedNs); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("%w: upload %q", errs.ErrUploadNotFound, uploadID)
+		}
+		return nil, err
+	}
+	u.Key = string(key)
+	return &u, nil
+}
+
+// ListUploads 按创建时间返回指定桶的进行中会话。
+func (d *DB) ListUploads(ctx context.Context, bucket string) ([]UploadRow, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT upload_id, bucket, key, meta_json, created_at FROM uploads WHERE bucket = ? ORDER BY created_at`, bucket)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UploadRow
+	for rows.Next() {
+		var u UploadRow
+		var key []byte
+		if err := rows.Scan(&u.UploadID, &u.Bucket, &key, &u.MetaJSON, &u.CreatedNs); err != nil {
+			return nil, err
+		}
+		u.Key = string(key)
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// GetUploadPart 读取单个已上传 part（未命中返回 nil, nil；MpPut 记账用）。
+func (d *DB) GetUploadPart(ctx context.Context, uploadID string, partNo int) (*PartRow, error) {
+	row := d.db.QueryRowContext(ctx,
+		`SELECT part_no, sha256, size, etag FROM upload_parts WHERE upload_id = ? AND part_no = ?`, uploadID, partNo)
+	var p PartRow
+	if err := row.Scan(&p.PartNo, &p.Sha256, &p.Size, &p.ETag); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &p, nil
 }
 
 func (d *DB) UploadParts(ctx context.Context, uploadID string) ([]PartRow, error) {

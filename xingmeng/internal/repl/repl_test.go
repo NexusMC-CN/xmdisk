@@ -21,6 +21,7 @@ func newStore(t *testing.T, name string) *store.Store {
 		SmallThreshold: 1 << 20,
 		ChunkSize:      4 << 20,
 		GCGrace:        time.Hour,
+		KEK:            []byte("repl-test-kek"), // 部署级共享：主从同 KEK（99-D009）
 	})
 	if err != nil {
 		t.Fatalf("open store %s: %v", name, err)
@@ -87,6 +88,10 @@ func TestReplicationBasic(t *testing.T) {
 	mustPutS(t, mst, "alpha", "gone", 8<<10, store.PutOptions{})
 	if err := mst.Delete(ctx, "alpha", "gone"); err != nil {
 		t.Fatalf("delete: %v", err)
+	}
+	// 凭据（密文）同样复制：从节点提升后必须能验签（99-D009）
+	if err := mst.CreateCred(ctx, "REPLAK01", "repl-secret-0123456789", "alpha"); err != nil {
+		t.Fatalf("create cred: %v", err)
 	}
 
 	master := NewMaster(mst, "tok")
@@ -155,6 +160,18 @@ func TestReplicationBasic(t *testing.T) {
 	}
 	if _, err := slvStore.Stat(ctx, "alpha", "more"); err != nil {
 		t.Fatalf("incremental entry: %v", err)
+	}
+	// 凭据已复制且从节点可解密验签；删除同样复制
+	cred, err := slvStore.LookupCred(ctx, "REPLAK01")
+	if err != nil || cred.Secret != "repl-secret-0123456789" || cred.Bucket != "alpha" {
+		t.Fatalf("cred replication: %v %+v", err, cred)
+	}
+	if err := mst.DeleteCred(ctx, "REPLAK01"); err != nil {
+		t.Fatalf("delete cred: %v", err)
+	}
+	drain(t, ctx, sl)
+	if _, err := slvStore.LookupCred(ctx, "REPLAK01"); err == nil {
+		t.Fatalf("cred delete must replicate")
 	}
 }
 

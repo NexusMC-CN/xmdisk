@@ -104,9 +104,10 @@ func (s *Store) Put(ctx context.Context, bucket, key string, src io.Reader, opts
 		if old != nil {
 			delta, dObj = total-old.Size, 0
 		}
-		if b.Quota != nil && b.Used+delta > *b.Quota {
-			return fmt.Errorf("%w: bucket %q used %d + delta %d > quota %d",
-				errs.ErrQuotaExceeded, bucket, b.Used, delta, *b.Quota)
+		// 配额口径含 pending：在途 multipart 占用的空间同样受限（99-D008）
+		if b.Quota != nil && b.Used+b.Pending+delta > *b.Quota {
+			return fmt.Errorf("%w: bucket %q used+pending %d + delta %d > quota %d",
+				errs.ErrQuotaExceeded, bucket, b.Used+b.Pending, delta, *b.Quota)
 		}
 		e := &meta.Entry{
 			Bucket: bucket, Key: key, Size: total, ETag: etag,
