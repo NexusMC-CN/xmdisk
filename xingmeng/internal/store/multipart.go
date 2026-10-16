@@ -85,7 +85,17 @@ func (s *Store) MpPut(ctx context.Context, uploadID string, partNo int, src io.R
 		return "", 0, err
 	}
 	mr := md5.New()
-	sha, size, err := s.blobs.Put(io.TeeReader(src, mr))
+	// 流式配额守卫（99-D019）：part 落盘前设上限，防特大 part 打爆磁盘；
+	// 重传同一 part 时旧值空间可抵扣
+	var credit int64
+	if old, oerr := s.meta.GetUploadPart(ctx, uploadID, partNo); oerr == nil && old != nil {
+		credit = old.Size
+	}
+	guarded, gerr := s.quotaGuard(ctx, src, u.Bucket, "", credit)
+	if gerr != nil {
+		return "", 0, gerr
+	}
+	sha, size, err := s.blobs.Put(io.TeeReader(guarded, mr))
 	if err != nil {
 		return "", 0, err
 	}

@@ -79,17 +79,25 @@ func (s *Store) Put(src io.Reader) (hash string, size int64, err error) {
 		return
 	}
 	hash = hex.EncodeToString(h.Sum(nil))
-	dst, perr := s.path(hash)
+	dst, perr := s.ensureShardDirs(hash)
 	if perr != nil {
 		err = perr
 		return
 	}
-	if err = os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if s.Exists(hash) {
+		// 目标已是真实普通文件：内容按哈希一致，去重复用
+		os.Remove(tmpName)
 		return
 	}
+	if fi, lerr := os.Lstat(dst); lerr == nil && !fi.Mode().IsRegular() {
+		// 链接跳板占位：铲除后重写真实文件（自愈，99-D018）
+		if rerr := os.Remove(dst); rerr != nil {
+			err = rerr
+			return
+		}
+	}
 	if err = os.Rename(tmpName, dst); err != nil {
-		// 目标已存在（并发/重复写同内容）：内容按哈希一致，复用即可。
-		if _, serr := os.Stat(dst); serr == nil {
+		if s.Exists(hash) { // 并发同内容竞态：内容一致，复用
 			os.Remove(tmpName)
 			err = nil
 		}
@@ -98,33 +106,75 @@ func (s *Store) Put(src io.Reader) (hash string, size int64, err error) {
 }
 
 // Open 打开 blob 用于读取（调用方负责 Close；配合 Seek/LimitReader 做区间读）。
+// 路径必须 Lstat 为普通文件：拒绝符号链接/reparse point 跳板（99-D018）。
 func (s *Store) Open(h string) (*os.File, error) {
 	p, err := s.path(h)
 	if err != nil {
 		return nil, err
 	}
+	if err := lstatRegular(p); err != nil {
+		return nil, err
+	}
 	return os.Open(p)
 }
 
+// Size 返回 blob 字节数（同样拒绝链接跳板）。
 func (s *Store) Size(h string) (int64, error) {
 	p, err := s.path(h)
 	if err != nil {
 		return 0, err
 	}
-	info, err := os.Stat(p)
+	if err := lstatRegular(p); err != nil {
+		return 0, err
+	}
+	info, err := os.Lstat(p)
 	if err != nil {
 		return 0, err
 	}
 	return info.Size(), nil
 }
 
+// Exists 只认真实普通文件（Lstat，不跟随链接）。
 func (s *Store) Exists(h string) bool {
 	p, err := s.path(h)
 	if err != nil {
 		return false
 	}
-	_, err = os.Stat(p)
-	return err == nil
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// lstatRegular：路径必须是普通文件。符号链接/reparse point/设备文件一律拒绝——
+// 防"存储目录内被植入跳板链接读写外部文件"（区别于 ../ 穿越，99-D018）。
+func lstatRegular(p string) error {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%w: %q is not a regular file (symlink planted?)", errs.ErrInvalidArgument, p)
+	}
+	return nil
+}
+
+// ensureShardDirs 建立并校验哈希分片目录链（blobs/xx/yy 必须是真实目录）。
+func (s *Store) ensureShardDirs(hash string) (string, error) {
+	p, err := s.path(hash)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return "", err
+	}
+	cur := s.root
+	for _, seg := range []string{"blobs", hash[:2], hash[2:4]} {
+		cur = filepath.Join(cur, seg)
+		fi, lerr := os.Lstat(cur)
+		if lerr != nil || !fi.IsDir() || fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return "", fmt.Errorf("%w: shard dir %q is not a real directory", errs.ErrInvalidArgument, cur)
+		}
+	}
+	return p, nil
 }
 
 // TrashExists 报告 blob 是否处于待删除区（repl 墓碑感知，99-D006）。
@@ -170,6 +220,14 @@ func (s *Store) SweepTrash(olderThan time.Duration, keep func(hash string) bool)
 	}
 	cut := time.Now().Add(-olderThan)
 	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			// 符号链接/非常规文件：只删链接本身，绝不复活、绝不动目标（99-D018）
+			if rerr := os.Remove(filepath.Join(dir, e.Name())); rerr != nil {
+				return swept, resurrected, rerr
+			}
+			swept++
+			continue
+		}
 		info, ierr := e.Info()
 		if ierr != nil {
 			return swept, resurrected, ierr
@@ -186,19 +244,16 @@ func (s *Store) SweepTrash(olderThan time.Duration, keep func(hash string) bool)
 			continue // 非法文件名：垃圾直接清
 		}
 		if keep(h) {
-			p, perr := s.path(h)
+			p, perr := s.ensureShardDirs(h)
 			if perr != nil {
 				return swept, resurrected, perr
 			}
-			if _, serr := os.Stat(p); serr == nil {
-				// blobs/ 已有同哈希（删除后重写）：清 trash 副本即可
+			if s.Exists(h) {
+				// blobs/ 已有同哈希真实文件（删除后重写）：清 trash 副本即可
 				if rerr := os.Remove(tp); rerr != nil {
 					return swept, resurrected, rerr
 				}
 			} else {
-				if merr := os.MkdirAll(filepath.Dir(p), 0o755); merr != nil {
-					return swept, resurrected, merr
-				}
 				if rerr := os.Rename(tp, p); rerr != nil {
 					return swept, resurrected, rerr
 				}
@@ -242,7 +297,7 @@ func (s *Store) List() ([]string, error) {
 				return nil, err
 			}
 			for _, f := range files {
-				if !f.IsDir() && hashRe.MatchString(f.Name()) {
+				if f.Type().IsRegular() && hashRe.MatchString(f.Name()) {
 					out = append(out, f.Name())
 				}
 			}

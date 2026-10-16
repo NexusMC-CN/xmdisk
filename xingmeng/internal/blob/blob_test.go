@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -112,5 +114,87 @@ func TestTrashAndSweep(t *testing.T) {
 	}
 	if s.Exists(h) {
 		t.Fatalf("blob should be gone")
+	}
+}
+
+// TestSymlinkHardening 防跳板链接（99-D018，源自用户备份还原项目的真实事故）：
+// 存储目录内被植入指向外部的符号链接时，绝不跟随读写、绝不在清扫时复活。
+func TestSymlinkHardening(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	data := randBytes(t, 16<<10)
+	h, _, err := s.Put(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	p, err := s.path(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 存储目录外的诱饵文件
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	plant := func(where string) bool {
+		os.Remove(where)
+		if err := os.Symlink(secret, where); err != nil {
+			t.Skipf("平台不允许创建符号链接（Windows 需开发者模式），留待 Linux 容器覆盖: %v", err)
+			return false
+		}
+		return true
+	}
+
+	// blobs 位被链接占位：读路径全部拒绝
+	if !plant(p) {
+		return
+	}
+	if s.Exists(h) {
+		t.Fatalf("Exists must not follow symlink")
+	}
+	if _, err := s.Open(h); !errors.Is(err, errs.ErrInvalidArgument) {
+		t.Fatalf("Open must reject symlink: %v", err)
+	}
+	if _, err := s.Size(h); !errors.Is(err, errs.ErrInvalidArgument) {
+		t.Fatalf("Size must reject symlink: %v", err)
+	}
+	// List 过滤链接
+	if got, _ := s.List(); len(got) != 0 {
+		t.Fatalf("List must skip symlink: %v", got)
+	}
+
+	// 同内容重写：铲除链接占位，落真实文件（自愈）
+	h2, _, err := s.Put(bytes.NewReader(data))
+	if err != nil || h2 != h {
+		t.Fatalf("put over planted symlink: %v %s", err, h2)
+	}
+	f, err := s.Open(h)
+	if err != nil {
+		t.Fatalf("open after heal: %v", err)
+	}
+	body, _ := io.ReadAll(f)
+	f.Close()
+	if !bytes.Equal(body, data) {
+		t.Fatalf("healed content mismatch")
+	}
+
+	// trash 中的链接：清扫只删链接本身，不复活、不动目标
+	os.Remove(p)
+	if !plant(filepath.Join(s.root, "trash", h)) {
+		return
+	}
+	swept, resurr, err := s.SweepTrash(0, func(string) bool { return true }) // keep=true 也不得复活
+	if err != nil || resurr != 0 || swept != 1 {
+		t.Fatalf("link must be removed not resurrected: %v swept=%d resurr=%d", err, swept, resurr)
+	}
+	if s.Exists(h) {
+		t.Fatalf("link must not be resurrected into blobs/")
+	}
+	got, _ := os.ReadFile(secret)
+	if string(got) != "TOPSECRET" {
+		t.Fatalf("link target must be untouched")
 	}
 }

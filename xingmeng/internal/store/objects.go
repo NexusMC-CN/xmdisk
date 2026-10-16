@@ -72,7 +72,13 @@ func (s *Store) Put(ctx context.Context, bucket, key string, src io.Reader, opts
 	if e, err := s.meta.GetEntry(ctx, bucket, key); err == nil && e.IsDir {
 		return nil, errs.ErrIsDirectory
 	}
-	refs, total, etag, err := s.writeBlobs(src)
+	// 流式配额守卫：预读计数快照给写入设上限，超限即刻中断——
+	// 防"流完特大文件后事务才拒绝"把磁盘打爆（99-D019；权威校验仍在事务内）
+	guarded, gerr := s.quotaGuard(ctx, src, bucket, key, 0)
+	if gerr != nil {
+		return nil, gerr
+	}
+	refs, total, etag, err := s.writeBlobs(guarded)
 	if err != nil {
 		return nil, err
 	}
@@ -404,6 +410,45 @@ func emitToken(key string, isCP bool) string {
 }
 
 // ---- 内部工具 ----
+
+// quotaReader 流式配额守卫的读端：消费一旦越过剩余额度立刻报错，
+// 上层（blob.Put 的临时文件路径）随之清理，磁盘不落多余字节。
+type quotaReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func (q *quotaReader) Read(p []byte) (int, error) {
+	n, err := q.r.Read(p)
+	q.remaining -= int64(n)
+	if q.remaining < 0 {
+		return n, fmt.Errorf("%w: streaming upload exceeds remaining quota allowance", errs.ErrQuotaExceeded)
+	}
+	return n, err
+}
+
+// quotaGuard 以当前桶计数快照计算写入额度并包装源流。credit 是可抵扣的
+// 旧空间（覆盖写的旧对象 / 重传 part 的旧值）。快照非原子：并发下的超额
+// 上界是各流起步时的额度之和，权威校验仍在提交事务内（99-D019）。
+func (s *Store) quotaGuard(ctx context.Context, src io.Reader, bucket, key string, credit int64) (io.Reader, error) {
+	b, err := s.meta.GetBucket(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if b.Quota == nil {
+		return src, nil // 不限桶：单次 PUT 上限由 MaxObjectSize 兜底
+	}
+	if key != "" {
+		if e, eerr := s.meta.GetEntry(ctx, bucket, key); eerr == nil && !e.IsDir {
+			credit += e.Size
+		}
+	}
+	allowance := *b.Quota - b.Used - b.Pending + credit
+	if allowance < 0 {
+		allowance = 0
+	}
+	return &quotaReader{r: src, remaining: allowance}, nil
+}
 
 // writeBlobs 将流式内容写为 blob 引用列表：小文件整存、大文件定长分块
 // （99-D002）。全程同步计算整流 MD5 作为默认 ETag（rclone 等工具依赖
