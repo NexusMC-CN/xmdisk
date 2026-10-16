@@ -17,6 +17,7 @@ import (
 	"xingmeng/internal/s3"
 	xsftp "xingmeng/internal/sftp"
 	"xingmeng/internal/store"
+	xwebdav "xingmeng/internal/webdav"
 )
 
 const (
@@ -157,7 +158,34 @@ func (n *Node) ReplHandler() http.Handler {
 	})
 }
 
-// ---- S3Handler：数据面（serve=off 时全量 503，含未鉴权请求）----
+// ---- DataHandler：数据面 HTTP（/dav/ → WebDAV，其余 → S3；serve=off 全量 503）----
+
+func (n *Node) DataHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/dav/", xwebdav.Router(n.store))
+	mux.Handle("/", n.S3Handler())
+	return n.serveGate(mux)
+}
+
+func (n *Node) serveGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !n.serving() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"data plane is off (serve=off)"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (n *Node) serving() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.serve != ServeOff
+}
+
+// ---- S3Handler：S3 子路由（serve=off 时全量 503，含未鉴权请求）----
 
 func (n *Node) S3Handler() http.Handler {
 	inner := s3.New(n.store)

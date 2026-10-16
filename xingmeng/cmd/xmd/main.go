@@ -55,7 +55,7 @@ func main() {
 	}
 
 	servers := []*http.Server{
-		listen(cfg.Listeners.DataHTTP, n.S3Handler(), "data-http"),
+		listen(cfg.Listeners.DataHTTP, n.DataHandler(), "data-http"),
 		listen(cfg.Listeners.Admin, api.AdminRouter(n, cfg.AdminToken), "admin"),
 		listen(cfg.Listeners.Repl, n.ReplHandler(), "repl"),
 	}

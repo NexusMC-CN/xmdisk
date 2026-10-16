@@ -17,6 +17,7 @@ Go 实现的兼容 S3/SFTP/WebDAV 的自建存储服务。设计文档见 [`../d
 | `internal/api` | admin 路由组（状态/开关/灾备/桶/凭据/metrics） | 04 |
 | `internal/s3` | S3 适配层（SigV4、全端点） | 01 |
 | `internal/sftp` | SFTP 适配层（AK/SK 认证绑桶、临时文件+限流） | 01 |
+| `internal/webdav` | WebDAV 适配层（/dav/<bucket>、MemLS 锁、递归删除） | 01 |
 | `cmd/xmd` | 入口：配置 → 节点 → 监听面组装 | 05 |
 
 依赖方向单向：`协议层 → store → meta/blob → errs`。
@@ -37,4 +38,4 @@ go test ./...
 桶与凭据管理（含 rotate）、配置（YAML 友好单位）与运行态分离。
 入口 `cmd/xmd`：三监听面（data_http/admin/repl）+ 优雅退出。
 灾备 runbook 已有机制级自动回归（internal/api TestFailoverRunbook）。
-下一步：WebDAV 适配 → 二进制级 e2e（Docker：-race、aws-cli/rclone/WinSCP 冒烟、runbook 演练）。
+三协议（S3/SFTP/WebDAV）全部就绪。下一步：Docker 二进制级 e2e（-race、aws-cli/rclone/真实客户端冒烟、符号链接测试真跑、runbook 演练）。
