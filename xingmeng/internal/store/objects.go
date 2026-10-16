@@ -450,6 +450,27 @@ func (s *Store) quotaGuard(ctx context.Context, src io.Reader, bucket, key strin
 	return &quotaReader{r: src, remaining: allowance}, nil
 }
 
+// QuotaAllowance 返回当前可写入的剩余额度（含覆盖写抵扣）；false = 不限桶。
+// 供无法走 Put 流式守卫的路径（如 SFTP 临时文件写入）做写入前/中限流（99-D019）。
+func (s *Store) QuotaAllowance(ctx context.Context, bucket, key string) (int64, bool, error) {
+	b, err := s.meta.GetBucket(ctx, bucket)
+	if err != nil {
+		return 0, false, err
+	}
+	if b.Quota == nil {
+		return 0, false, nil
+	}
+	var credit int64
+	if e, eerr := s.meta.GetEntry(ctx, bucket, key); eerr == nil && !e.IsDir {
+		credit = e.Size
+	}
+	allowance := *b.Quota - b.Used - b.Pending + credit
+	if allowance < 0 {
+		allowance = 0
+	}
+	return allowance, true, nil
+}
+
 // writeBlobs 将流式内容写为 blob 引用列表：小文件整存、大文件定长分块
 // （99-D002）。全程同步计算整流 MD5 作为默认 ETag（rclone 等工具依赖
 // md5 形态的 etag；multipart 的合成 etag 由 S3 适配层在 Complete 时覆写）。

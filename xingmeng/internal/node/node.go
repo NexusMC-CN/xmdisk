@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"xingmeng/internal/errs"
 	"xingmeng/internal/repl"
 	"xingmeng/internal/s3"
+	xsftp "xingmeng/internal/sftp"
 	"xingmeng/internal/store"
 )
 
@@ -33,6 +35,8 @@ type Node struct {
 
 	store    *store.Store
 	gcCancel context.CancelFunc
+
+	sftpSrv *xsftp.Server // SSH/SFTP 服务端（serve≠off 时接受连接）
 
 	syncCancel context.CancelFunc
 	syncDone   chan struct{}
@@ -87,6 +91,13 @@ func Start(ctx context.Context, cfg *config.Config, kek []byte) (*Node, error) {
 	n := &Node{cfg: cfg, kek: kek, role: role, serve: serve, epoch: epoch, store: st}
 	if role == "master" {
 		n.master = repl.NewMaster(st, cfg.Replication.Token)
+	}
+	if cfg.Listeners.DataSSH != "" {
+		if sf, err := xsftp.NewServer(st, cfg.Node.DataDir); err == nil {
+			n.sftpSrv = sf
+		} else {
+			slog.Warn("sftp server init failed; data_ssh disabled", "err", err)
+		}
 	}
 	n.saveState()
 
@@ -162,6 +173,20 @@ func (n *Node) S3Handler() http.Handler {
 		}
 		inner.ServeHTTP(w, r)
 	})
+}
+
+// ---- SFTPConn：SSH 数据面入口（serve=off 时直接断开）----
+
+func (n *Node) SFTPConn(conn net.Conn) {
+	n.mu.Lock()
+	off := n.serve == ServeOff
+	srv := n.sftpSrv
+	n.mu.Unlock()
+	if off || srv == nil {
+		conn.Close()
+		return
+	}
+	go srv.ServeConn(conn)
 }
 
 // ---- serve 开关 ----

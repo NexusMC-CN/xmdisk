@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -58,8 +59,22 @@ func main() {
 		listen(cfg.Listeners.Admin, api.AdminRouter(n, cfg.AdminToken), "admin"),
 		listen(cfg.Listeners.Repl, n.ReplHandler(), "repl"),
 	}
+	// SSH/SFTP 数据面（原生 TCP，非 HTTP）
 	if cfg.Listeners.DataSSH != "" {
-		slog.Warn("SFTP adapter not implemented yet, data_ssh listener skipped", "addr", cfg.Listeners.DataSSH)
+		sshLn, err := net.Listen("tcp", cfg.Listeners.DataSSH)
+		if err != nil {
+			fatal("listen data_ssh %s: %v", cfg.Listeners.DataSSH, err)
+		}
+		go func() {
+			for {
+				conn, err := sshLn.Accept()
+				if err != nil {
+					return
+				}
+				n.SFTPConn(conn)
+			}
+		}()
+		slog.Info("listening", "face", "data-ssh", "addr", cfg.Listeners.DataSSH)
 	}
 
 	go func() {
