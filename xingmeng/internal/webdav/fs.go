@@ -351,6 +351,10 @@ func (f *FS) resolve(p string) (key string, oi *store.ObjInfo, err error) {
 	if oi, err = f.store.Stat(ctx, f.bucket, norm+"/"); err == nil {
 		return norm + "/", oi, nil
 	}
+	// 虚拟目录：S3 前缀隐式产生（无标记条目），有子条目即可导航
+	if f.store.HasChildren(ctx, f.bucket, norm+"/") {
+		return norm + "/", &store.ObjInfo{Bucket: f.bucket, Key: norm + "/", IsDir: true}, nil
+	}
 	return "", nil, err
 }
 

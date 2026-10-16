@@ -305,6 +305,10 @@ func (b *Backend) resolve(p string) (key string, oi *store.ObjInfo, err error) {
 	if oi, err = b.store.Stat(context.Background(), b.bucket, norm+"/"); err == nil {
 		return norm + "/", oi, nil
 	}
+	// 虚拟目录：S3 前缀隐式产生（无标记条目），有子条目即可导航
+	if b.store.HasChildren(context.Background(), b.bucket, norm+"/") {
+		return norm + "/", &store.ObjInfo{Bucket: b.bucket, Key: norm + "/", IsDir: true}, nil
+	}
 	return "", nil, err
 }
 

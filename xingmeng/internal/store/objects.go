@@ -255,7 +255,14 @@ func (s *Store) Mkdir(ctx context.Context, bucket, path string) error {
 	return err
 }
 
-// Rmdir 删除空目录。
+// HasChildren 报告前缀下是否存在任意条目（虚拟目录判定用）。
+func (s *Store) HasChildren(ctx context.Context, bucket, prefix string) bool {
+	lo, hi := meta.PrefixRange([]byte(prefix))
+	entries, err := s.meta.ListEntries(ctx, bucket, lo, hi, 1)
+	return err == nil && len(entries) > 0
+}
+
+// Rmdir 删除空目录；对无显式标记的隐式目录幂等（S3 前缀产生的虚拟目录）。
 func (s *Store) Rmdir(ctx context.Context, bucket, path string) error {
 	if err := validateDirPath(path); err != nil {
 		return err
@@ -264,7 +271,18 @@ func (s *Store) Rmdir(ctx context.Context, bucket, path string) error {
 	return s.mutate(ctx, func(t *meta.Tx) error {
 		e, err := t.GetEntry(bucket, key)
 		if err != nil {
-			return err
+			if !errors.Is(err, errs.ErrKeyNotFound) {
+				return err
+			}
+			// 隐式目录：无标记。有子条目则非空，否则视为已删除（幂等）
+			n, cerr := t.CountPrefix(bucket, key)
+			if cerr != nil {
+				return cerr
+			}
+			if n > 0 {
+				return fmt.Errorf("%w: %q has %d entries", errs.ErrDirNotEmpty, path, n)
+			}
+			return nil
 		}
 		if !e.IsDir {
 			return errs.ErrIsFile

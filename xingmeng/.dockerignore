@@ -1,0 +1,9 @@
+var/
+*.db
+*.db-wal
+*.db-shm
+blobs/
+tmp/
+trash/
+snapshots/
+.env
