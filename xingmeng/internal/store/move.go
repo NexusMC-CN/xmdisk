@@ -56,7 +56,7 @@ func (s *Store) SetAttrs(ctx context.Context, bucket, key string, patch AttrPatc
 		if err := t.UpsertEntry(e); err != nil {
 			return err
 		}
-		return appendEntryPutOp(t, s.cfg.Epoch, e)
+		return appendEntryPutOp(t, s.currentEpoch(), e)
 	})
 }
 
@@ -104,7 +104,7 @@ func (s *Store) Move(ctx context.Context, bucket, src, dst string) error {
 					return err
 				}
 			}
-			return appendOp(t, s.cfg.Epoch, meta.OpTreeMove,
+			return appendOp(t, s.currentEpoch(), meta.OpTreeMove,
 				treeMovePayload{Bucket: bucket, Src: []byte(src), Dst: []byte(dst)})
 		})
 	}
@@ -144,10 +144,10 @@ func (s *Store) Move(ctx context.Context, bucket, src, dst string) error {
 				return err
 			}
 		}
-		if err := appendEntryPutOp(t, s.cfg.Epoch, e); err != nil {
+		if err := appendEntryPutOp(t, s.currentEpoch(), e); err != nil {
 			return err
 		}
-		return appendOp(t, s.cfg.Epoch, meta.OpEntryDelete, entryDeletePayload{Bucket: bucket, Key: []byte(src)})
+		return appendOp(t, s.currentEpoch(), meta.OpEntryDelete, entryDeletePayload{Bucket: bucket, Key: []byte(src)})
 	})
 }
 

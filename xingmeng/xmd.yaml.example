@@ -1,0 +1,30 @@
+# 星梦存储节点配置示例（docs/05）。复制到部署目录改后使用。
+# KEK 不在此文件：仅从环境变量 XM_KEK 读取（开发期 .env，见 .env.example）。
+
+node:
+  role: master            # master | slave（初值；运行期变更持久化于 node-state.json）
+  id: node-1              # 从节点标识，缺省 hostname
+  data_dir: ./var
+
+listeners:
+  data_http: 0.0.0.0:9000   # S3（根路径，path-style）
+  data_ssh: 0.0.0.0:9001    # SFTP（适配实现后启用）
+  admin: 127.0.0.1:9002     # 管理面（上公网前务必加 admin_token 或绑内网）
+  repl: 0.0.0.0:9003        # 复制面
+
+storage:
+  blob_small_threshold: 4MB
+  chunk_size: 8MB
+  max_object_size: 5GB
+  multipart_max_object: 1TB
+  gc_interval: 1h
+  gc_grace: 48h
+  multipart_abort_after: 168h
+
+replication:
+  master_addr: ""           # slave 填，如 http://10.0.0.2:9003
+  token: ""                 # 复制面共享凭证
+
+admin_token: ""             # admin 面凭证；空 = 不鉴权（仅限开发绑 127.0.0.1）
+log:
+  level: info

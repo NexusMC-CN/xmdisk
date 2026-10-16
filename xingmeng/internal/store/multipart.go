@@ -228,7 +228,7 @@ func (s *Store) MpComplete(ctx context.Context, uploadID string, clientParts []P
 		if err := t.DeleteUpload(uploadID); err != nil {
 			return err
 		}
-		if err := appendEntryPutOp(t, s.cfg.Epoch, e); err != nil {
+		if err := appendEntryPutOp(t, s.currentEpoch(), e); err != nil {
 			return err
 		}
 		out = &ObjInfo{

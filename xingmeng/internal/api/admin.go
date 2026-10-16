@@ -1,0 +1,406 @@
+// Package api 是 HTTP 路由组挂载点（docs/04 监听面；用户路由习惯：
+// main 挂路由组，路由组挂鉴权+业务，鉴权后补——AdminToken 非空即启用鉴权）。
+package api
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+
+	"xingmeng/internal/errs"
+	"xingmeng/internal/node"
+)
+
+// AdminRouter 返回 admin 面路由（docs/04 admin API 一节）。
+func AdminRouter(n *node.Node, token string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status", handleStatus(n))
+	mux.HandleFunc("GET /health", handleHealth(n))
+	mux.HandleFunc("GET /metrics", handleMetrics(n))
+	mux.HandleFunc("POST /serve", handleServe(n))
+	mux.HandleFunc("POST /sync", handleSync(n))
+	mux.HandleFunc("POST /promote", handlePromote(n))
+	mux.HandleFunc("POST /snapshot", masterOnly(n, handleSnapshot(n)))
+	mux.HandleFunc("POST /gc", handleGC(n))
+	mux.HandleFunc("POST /verify", handleVerify(n))
+	mux.HandleFunc("GET /buckets", handleListBuckets(n))
+	mux.HandleFunc("POST /buckets", handleCreateBucket(n))
+	mux.HandleFunc("DELETE /buckets/{name}", handleDeleteBucket(n))
+	mux.HandleFunc("PATCH /buckets/{name}", handlePatchBucket(n))
+	mux.HandleFunc("GET /creds", handleListCreds(n))
+	mux.HandleFunc("POST /creds", handleCreateCred(n))
+	mux.HandleFunc("POST /creds/{ak}/rotate", handleRotateCred(n))
+	mux.HandleFunc("DELETE /creds/{ak}", handleDeleteCred(n))
+	return auth(token, mux)
+}
+
+func auth(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token != "" && r.Header.Get("X-Xm-Token") != token {
+			writeJSON(w, 401, map[string]any{"error": "bad or missing admin token"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readJSON(r *http.Request, v any) error {
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		return fmt.Errorf("%w: %v", errs.ErrInvalidArgument, err)
+	}
+	return nil
+}
+
+// fail：可预期的业务错误（sentinel 族）统一 400，其余 500。
+func fail(w http.ResponseWriter, err error) {
+	status := 500
+	for _, s := range []error{
+		errs.ErrInvalidArgument, errs.ErrKeyNotFound, errs.ErrBucketNotFound,
+		errs.ErrBucketExists, errs.ErrQuotaExceeded, errs.ErrReadOnly, errs.ErrDirNotEmpty,
+	} {
+		if errors.Is(err, s) {
+			status = 400
+			break
+		}
+	}
+	writeJSON(w, status, map[string]any{"error": err.Error()})
+}
+
+func masterOnly(n *node.Node, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if st, _ := n.Status(r.Context()); st == nil || st.Role != "master" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "node is not master"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+// ---- 状态 ----
+
+func handleStatus(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		st, err := n.Status(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		buckets, err := n.Store().ListBucketStats(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"node": st, "buckets": buckets})
+	}
+}
+
+func handleHealth(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		st, err := n.Status(r.Context())
+		if err != nil {
+			writeJSON(w, 503, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "role": st.Role, "serve": st.Serve, "kek_configured": st.KEKConfigured})
+	}
+}
+
+// handleMetrics 输出 Prometheus 文本格式（gauge 集；scrape 即时计算，无缓存）。
+func handleMetrics(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		st, err := n.Status(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		roleGauge := 0
+		if st.Role == "master" {
+			roleGauge = 1
+		}
+		serveGauge := map[string]int{"off": 0, "ro": 1, "rw": 2}[st.Serve]
+		out := fmt.Sprintf(`# HELP xm_node_role 1=master 0=slave
+# TYPE xm_node_role gauge
+xm_node_role %d
+# HELP xm_node_serve 0=off 1=ro 2=rw
+# TYPE xm_node_serve gauge
+xm_node_serve %d
+# HELP xm_node_epoch Current op generation epoch
+# TYPE xm_node_epoch gauge
+xm_node_epoch %d
+# HELP xm_oplog_last_seq Last replicated oplog seq
+# TYPE xm_oplog_last_seq gauge
+xm_oplog_last_seq %d
+# HELP xm_sync_running 1 if slave sync loop running
+# TYPE xm_sync_running gauge
+xm_sync_running %d
+`, roleGauge, serveGauge, st.Epoch, st.LastSeq, boolToInt(st.SyncRunning))
+		buckets, err := n.Store().ListBucketStats(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		for _, b := range buckets {
+			out += fmt.Sprintf("xm_bucket_used_bytes{bucket=%q} %d\nxm_bucket_objects{bucket=%q} %d\nxm_bucket_pending_bytes{bucket=%q} %d\n",
+				b.Name, b.Used, b.Name, b.Objects, b.Name, b.Pending)
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.Write([]byte(out))
+	}
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// ---- 开关与灾备 ----
+
+func handleServe(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Mode string `json:"mode"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			fail(w, err)
+			return
+		}
+		if err := n.SetServe(req.Mode); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"serve": req.Mode})
+	}
+}
+
+func handleSync(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Action     string `json:"action"` // start | stop
+			MasterAddr string `json:"master_addr"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			fail(w, err)
+			return
+		}
+		var err error
+		switch req.Action {
+		case "start":
+			err = n.SyncStart(req.MasterAddr)
+		case "stop":
+			err = n.SyncStop()
+		default:
+			err = fmt.Errorf("%w: action must be start|stop", errs.ErrInvalidArgument)
+		}
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"sync": req.Action})
+	}
+}
+
+func handlePromote(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		res, err := n.Promote()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, res)
+	}
+}
+
+func handleSnapshot(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path, seq, err := n.Store().Snapshot(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"path": path, "seq": seq})
+	}
+}
+
+func handleGC(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		res, err := n.Store().RunGCOnce(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, res)
+	}
+}
+
+func handleVerify(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Limit int `json:"limit"`
+		}
+		if r.ContentLength > 0 {
+			if err := readJSON(r, &req); err != nil {
+				fail(w, err)
+				return
+			}
+		}
+		res, err := n.Store().VerifySample(r.Context(), req.Limit)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, res)
+	}
+}
+
+// ---- 桶 ----
+
+func handleListBuckets(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		stats, err := n.Store().ListBucketStats(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, stats)
+	}
+}
+
+func handleCreateBucket(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name  string `json:"name"`
+			Quota *int64 `json:"quota"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			fail(w, err)
+			return
+		}
+		if err := n.Store().CreateBucket(r.Context(), req.Name, req.Quota); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"name": req.Name, "quota": req.Quota})
+	}
+}
+
+func handleDeleteBucket(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := n.Store().DeleteBucket(r.Context(), r.PathValue("name")); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handlePatchBucket(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Quota *int64 `json:"quota"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			fail(w, err)
+			return
+		}
+		if err := n.Store().SetQuota(r.Context(), r.PathValue("name"), req.Quota); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"quota": req.Quota})
+	}
+}
+
+// ---- 凭据 ----
+
+func handleListCreds(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		creds, err := n.Store().ListCreds(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, creds)
+	}
+}
+
+// handleCreateCred 创建或覆盖凭据；secret 省略时服务端生成并在响应中
+// 返回一次（批量重置 KEK 丢失场景的原子单位，docs/02）。
+func handleCreateCred(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			AccessKey string `json:"access_key"`
+			Secret    string `json:"secret"`
+			Bucket    string `json:"bucket"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			fail(w, err)
+			return
+		}
+		generated := false
+		if req.Secret == "" {
+			raw := make([]byte, 24)
+			rand.Read(raw)
+			req.Secret = hex.EncodeToString(raw)
+			generated = true
+		}
+		if err := n.Store().CreateCred(r.Context(), req.AccessKey, req.Secret, req.Bucket); err != nil {
+			fail(w, err)
+			return
+		}
+		resp := map[string]any{"access_key": req.AccessKey, "bucket": req.Bucket}
+		if generated {
+			resp["secret"] = req.Secret // 仅此一次返回
+		}
+		writeJSON(w, 200, resp)
+	}
+}
+
+func handleRotateCred(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ak := r.PathValue("ak")
+		creds, err := n.Store().ListCreds(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		var bucket string
+		for _, c := range creds {
+			if c.AccessKey == ak {
+				bucket = c.Bucket
+			}
+		}
+		if bucket == "" {
+			fail(w, fmt.Errorf("%w: access key", errs.ErrKeyNotFound))
+			return
+		}
+		raw := make([]byte, 24)
+		rand.Read(raw)
+		secret := hex.EncodeToString(raw)
+		if err := n.Store().CreateCred(r.Context(), ak, secret, bucket); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"access_key": ak, "secret": secret}) // 仅此一次返回
+	}
+}
+
+func handleDeleteCred(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := n.Store().DeleteCred(r.Context(), r.PathValue("ak")); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}

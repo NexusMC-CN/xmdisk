@@ -134,7 +134,7 @@ func (s *Store) Put(ctx context.Context, bucket, key string, src io.Reader, opts
 		if err != nil {
 			return err
 		}
-		if err := appendOp(t, s.cfg.Epoch, meta.OpEntryPut, json.RawMessage(pl)); err != nil {
+		if err := appendOp(t, s.currentEpoch(), meta.OpEntryPut, json.RawMessage(pl)); err != nil {
 			return err
 		}
 		out = &ObjInfo{
@@ -240,7 +240,7 @@ func (s *Store) Delete(ctx context.Context, bucket, key string) error {
 		if err := t.AdjustUsage(bucket, -e.Size, 0, -1); err != nil {
 			return err
 		}
-		return appendOp(t, s.cfg.Epoch, meta.OpEntryDelete, entryDeletePayload{Bucket: bucket, Key: []byte(key)})
+		return appendOp(t, s.currentEpoch(), meta.OpEntryDelete, entryDeletePayload{Bucket: bucket, Key: []byte(key)})
 	})
 }
 
@@ -282,7 +282,7 @@ func (s *Store) Rmdir(ctx context.Context, bucket, path string) error {
 		if err := t.AdjustUsage(bucket, 0, 0, -1); err != nil {
 			return err
 		}
-		return appendOp(t, s.cfg.Epoch, meta.OpEntryDelete, entryDeletePayload{Bucket: bucket, Key: []byte(key)})
+		return appendOp(t, s.currentEpoch(), meta.OpEntryDelete, entryDeletePayload{Bucket: bucket, Key: []byte(key)})
 	})
 }
 
@@ -314,7 +314,7 @@ func (s *Store) putDir(ctx context.Context, bucket, key string, opts PutOptions)
 		if err := t.AdjustUsage(bucket, 0, 0, dObj); err != nil {
 			return err
 		}
-		if err := appendOp(t, s.cfg.Epoch, meta.OpEntryPut, entryPutPayload{
+		if err := appendOp(t, s.currentEpoch(), meta.OpEntryPut, entryPutPayload{
 			Bucket: bucket, Key: []byte(key), IsDir: true, Mode: 0o755, MTimeNs: now.UnixNano(),
 		}); err != nil {
 			return err

@@ -67,7 +67,7 @@ func (s *Store) CreateCred(ctx context.Context, accessKey, secret, bucket string
 		if err := t.InsertCred(accessKey, enc, bucket, time.Now().UnixNano()); err != nil {
 			return err
 		}
-		return appendOp(t, s.cfg.Epoch, meta.OpCredPut, credPutPayload{
+		return appendOp(t, s.currentEpoch(), meta.OpCredPut, credPutPayload{
 			AccessKey: accessKey, SecretEnc: base64.StdEncoding.EncodeToString(enc),
 			Bucket: bucket,
 		})
@@ -100,7 +100,7 @@ func (s *Store) DeleteCred(ctx context.Context, accessKey string) error {
 		if err := t.DeleteCred(accessKey); err != nil {
 			return err
 		}
-		return appendOp(t, s.cfg.Epoch, meta.OpCredDelete, credDeletePayload{AccessKey: accessKey})
+		return appendOp(t, s.currentEpoch(), meta.OpCredDelete, credDeletePayload{AccessKey: accessKey})
 	})
 }
 

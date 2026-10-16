@@ -49,7 +49,8 @@ type Store struct {
 	cfg   Config
 	meta  *meta.DB
 	blobs *blob.Store
-	ro    atomic.Bool // serve=ro（99-D014；admin 面接管开关）
+	ro    atomic.Bool   // serve=ro（99-D014；admin 面接管开关）
+	epoch atomic.Uint32 // 当前 op 生成 epoch（promote 时更新，99-D005）
 }
 
 func Open(cfg Config) (*Store, error) {
@@ -92,13 +93,20 @@ func Open(cfg Config) (*Store, error) {
 		m.Close()
 		return nil, fmt.Errorf("open blob store: %w", err)
 	}
-	return &Store{cfg: cfg, meta: m, blobs: b}, nil
+	st := &Store{cfg: cfg, meta: m, blobs: b}
+	st.epoch.Store(cfg.Epoch)
+	return st, nil
 }
 
 func (s *Store) Close() error { return s.meta.Close() }
 
 // SetReadOnly 对应 serve 开关的 ro 态；为 true 时一切变更操作返回 ErrReadOnly。
 func (s *Store) SetReadOnly(v bool) { s.ro.Store(v) }
+
+// SetEpoch 更新 op 生成 epoch（promote 时调用；新 op 立即携带新 epoch）。
+func (s *Store) SetEpoch(e uint32) { s.epoch.Store(e) }
+
+func (s *Store) currentEpoch() uint32 { return s.epoch.Load() }
 
 // ObjInfo 是适配层可见的对象视图。
 type ObjInfo struct {
@@ -158,7 +166,7 @@ func (s *Store) CreateBucket(ctx context.Context, name string, quota *int64) err
 		if err := t.CreateBucket(name, quota, time.Now().UnixNano()); err != nil {
 			return err
 		}
-		return appendOp(t, s.cfg.Epoch, meta.OpBucketCreate, bucketPayload{Name: name, Quota: quota})
+		return appendOp(t, s.currentEpoch(), meta.OpBucketCreate, bucketPayload{Name: name, Quota: quota})
 	})
 }
 
@@ -174,7 +182,7 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) error {
 		if err := t.DeleteBucket(name); err != nil {
 			return err
 		}
-		return appendOp(t, s.cfg.Epoch, meta.OpBucketDelete, bucketPayload{Name: name})
+		return appendOp(t, s.currentEpoch(), meta.OpBucketDelete, bucketPayload{Name: name})
 	})
 }
 
@@ -187,7 +195,7 @@ func (s *Store) SetQuota(ctx context.Context, name string, quota *int64) error {
 		if err := t.SetQuota(name, quota); err != nil {
 			return err
 		}
-		return appendOp(t, s.cfg.Epoch, meta.OpQuotaUpdate, bucketPayload{Name: name, Quota: quota})
+		return appendOp(t, s.currentEpoch(), meta.OpQuotaUpdate, bucketPayload{Name: name, Quota: quota})
 	})
 }
 
@@ -197,6 +205,23 @@ func (s *Store) BucketStat(ctx context.Context, name string) (*BucketStat, error
 		return nil, err
 	}
 	return &BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects}, nil
+}
+
+// ListBucketStats 返回全部桶用量（admin status 与 metrics 用）。
+func (s *Store) ListBucketStats(ctx context.Context) ([]BucketStat, error) {
+	names, err := s.meta.ListBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BucketStat, 0, len(names))
+	for _, name := range names {
+		b, err := s.meta.GetBucket(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects})
+	}
+	return out, nil
 }
 
 // LastSeq 返回 oplog 当前位点（admin/status 与从节点初始进度用）。
