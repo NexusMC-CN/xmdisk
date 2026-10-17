@@ -225,6 +225,8 @@ func (s *Store) Stat(ctx context.Context, bucket, key string) (*ObjInfo, error) 
 }
 
 // Delete 删除对象（条目层墓碑 = DELETE op；blob 由两阶段 GC 物理回收）。
+// 目录条目（key 以 / 结尾）返回 ErrIsDirectory——树形协议走 Rmdir；
+// S3 的目录标记删除走 DeleteDirMarker。
 func (s *Store) Delete(ctx context.Context, bucket, key string) error {
 	return s.mutate(ctx, func(t *meta.Tx) error {
 		e, err := t.GetEntry(bucket, key)
@@ -232,7 +234,7 @@ func (s *Store) Delete(ctx context.Context, bucket, key string) error {
 			return err
 		}
 		if e.IsDir {
-			return errs.ErrIsDirectory // 删目录走 Rmdir
+			return errs.ErrIsDirectory
 		}
 		if err := t.DeleteEntry(bucket, key); err != nil {
 			return err
@@ -240,6 +242,30 @@ func (s *Store) Delete(ctx context.Context, bucket, key string) error {
 		if err := t.AdjustUsage(bucket, -e.Size, 0, -1); err != nil {
 			return err
 		}
+		return appendOp(t, s.currentEpoch(), meta.OpEntryDelete, entryDeletePayload{Bucket: bucket, Key: []byte(key)})
+	})
+}
+
+// DeleteDirMarker 是 S3 DELETE "foo/" 的目录标记语义：仅删除标记条目本身，
+// 子条目不动——非空目录在列表中仍以前缀呈现（标准 S3 行为，删除"文件夹"由
+// 客户端先递归清空）。条目不存在 = 幂等成功。修复：此前 DELETE 目录键回
+// ErrIsDirectory→S3 映射 404，客户端把 404 当"已删除"报成功而标记残留。
+func (s *Store) DeleteDirMarker(ctx context.Context, bucket, key string) error {
+	return s.mutate(ctx, func(t *meta.Tx) error {
+		e, err := t.GetEntry(bucket, key)
+		if err != nil {
+			if errors.Is(err, errs.ErrKeyNotFound) {
+				return nil
+			}
+			return err
+		}
+		if !e.IsDir {
+			return errs.ErrIsDirectory
+		}
+		if err := t.DeleteEntry(bucket, key); err != nil {
+			return err
+		}
+		// 目录标记 0B，无用量调整
 		return appendOp(t, s.currentEpoch(), meta.OpEntryDelete, entryDeletePayload{Bucket: bucket, Key: []byte(key)})
 	})
 }

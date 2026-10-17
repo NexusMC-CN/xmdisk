@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -209,8 +210,8 @@ func (h *Handler) multiDelete(w http.ResponseWriter, r *http.Request, bucket, re
 	}
 	resp := deleteResponseXML{Xmlns: xmlNs}
 	for _, o := range req.Objects {
-		err := h.store.Delete(r.Context(), bucket, o.Key)
-		if err != nil && !errors.Is(err, errs.ErrKeyNotFound) {
+		err := h.deleteObject(r.Context(), bucket, o.Key)
+		if err != nil {
 			m := mapError(err)
 			resp.Error = append(resp.Error, struct {
 				Key     string `xml:"Key"`
@@ -264,7 +265,7 @@ func (h *Handler) objectOp(w http.ResponseWriter, r *http.Request, bucket, key, 
 	case http.MethodHead:
 		h.getObject(w, r, bucket, key, reqID, true)
 	case http.MethodDelete:
-		if err := h.store.Delete(r.Context(), bucket, key); err != nil && !errors.Is(err, errs.ErrKeyNotFound) {
+		if err := h.deleteObject(r.Context(), bucket, key); err != nil {
 			m := mapError(err)
 			writeXMLError(w, m.Status, m.Code, err.Error(), r.URL.Path, reqID)
 			return
@@ -272,6 +273,24 @@ func (h *Handler) objectOp(w http.ResponseWriter, r *http.Request, bucket, key, 
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeXMLError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method, r.URL.Path, reqID)
+	}
+}
+
+// deleteObject 统一 S3 DELETE 语义：键不存在幂等成功；目录键（"foo/"）为
+// 标记删除——删标记条目、子条目不动（非空目录仍以前缀呈现，递归清空是
+// 客户端职责）。修复点：此前目录键回 404 NoSuchKey，客户端视作"已删除"
+// 报成功而目录残留（用户实测 rclone/mc 删不掉 SFTP/WebDAV 建的目录）。
+func (h *Handler) deleteObject(ctx context.Context, bucket, key string) error {
+	err := h.store.Delete(ctx, bucket, key)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errs.ErrKeyNotFound):
+		return nil // S3 幂等
+	case errors.Is(err, errs.ErrIsDirectory):
+		return h.store.DeleteDirMarker(ctx, bucket, key)
+	default:
+		return err
 	}
 }
 

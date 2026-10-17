@@ -54,7 +54,14 @@ docker run --rm --network $NET -v mcdata:/data --entrypoint sh minio/mc -c "
 say "4. rclone 三协议冒烟（S3/WebDAV/SFTP，含 ETag 对账）"
 OBSC=$(docker run --rm rclone/rclone obscure "$SK")
 docker run --rm --network $NET -v mcdata:/data --entrypoint sh rclone/rclone -c "
-  export RCLONE_CONFIG_S3T_TYPE=s3 RCLONE_CONFIG_S3T_ENDPOINT=http://xmd-master:9000          RCLONE_CONFIG_S3T_ACCESS_KEY_ID=$AK RCLONE_CONFIG_S3T_SECRET_ACCESS_KEY=$SK          RCLONE_CONFIG_DAV_TYPE=webdav RCLONE_CONFIG_DAV_URL=http://xmd-master:9000/dav/$BKT          RCLONE_CONFIG_DAV_VENDOR=other RCLONE_CONFIG_DAV_USER=$AK RCLONE_CONFIG_DAV_PASS='$OBSC'          RCLONE_CONFIG_SF_TYPE=sftp RCLONE_CONFIG_SF_HOST=xmd-master RCLONE_CONFIG_SF_PORT=9001          RCLONE_CONFIG_SF_USER=$AK RCLONE_CONFIG_SF_PASS='$OBSC' RCLONE_CONFIG_SF_KNOWN_HOSTS_FILE=none   && mkdir -p /src && cp /data/small.bin /data/big.bin /src/   && rclone copy /src s3t:$BKT/rclone-dir/ && rclone check /src s3t:$BKT/rclone-dir/ --one-way   && rclone copy /src dav:rclone-dir/ && rclone check /src dav:rclone-dir/ --one-way   && rclone copy /src sf:/rclone-dir/ && rclone check /src sf:/rclone-dir/ --one-way" || fail "rclone smoke"
+  export RCLONE_CONFIG_S3T_TYPE=s3 RCLONE_CONFIG_S3T_ENDPOINT=http://xmd-master:9000          RCLONE_CONFIG_S3T_ACCESS_KEY_ID=$AK RCLONE_CONFIG_S3T_SECRET_ACCESS_KEY=$SK          RCLONE_CONFIG_DAV_TYPE=webdav RCLONE_CONFIG_DAV_URL=http://xmd-master:9000/dav/$BKT          RCLONE_CONFIG_DAV_VENDOR=other RCLONE_CONFIG_DAV_USER=$AK RCLONE_CONFIG_DAV_PASS='$OBSC'          RCLONE_CONFIG_SF_TYPE=sftp RCLONE_CONFIG_SF_HOST=xmd-master RCLONE_CONFIG_SF_PORT=9001          RCLONE_CONFIG_SF_USER=$AK RCLONE_CONFIG_SF_PASS='$OBSC' RCLONE_CONFIG_SF_KNOWN_HOSTS_FILE=none   && mkdir -p /src && cp /data/small.bin /data/big.bin /src/   && rclone copy /src s3t:$BKT/rclone-dir/ && rclone check /src s3t:$BKT/rclone-dir/ --one-way   && rclone copy /src dav:rclone-dir/ && rclone check /src dav:rclone-dir/ --one-way   && rclone copy /src sf:/rclone-dir/ && rclone check /src sf:/rclone-dir/ --one-way   && rclone mkdir sf:/mark-del" || fail "rclone smoke"
+
+say "4b. 目录标记删除回归（SFTP 建目录 → S3 协议删 → 确认消失；修复：DELETE 目录键曾回 404 被当成功）"
+docker run --rm --network $NET --entrypoint sh minio/mc -c "
+  mc alias set xm http://xmd-master:9000 $AK $SK >/dev/null
+  mc stat xm/$BKT/mark-del/ >/dev/null &&
+  mc rm xm/$BKT/mark-del/ >/dev/null &&
+  ! mc stat xm/$BKT/mark-del/ >/dev/null 2>&1" || fail "dir marker delete"
 
 say "5. 起从节点（env：XM_ROLE=slave + XM_MASTER_ADDR；repl token 同值）并等待追平"
 docker run -d --name $S --network $NET \

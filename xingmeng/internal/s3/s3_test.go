@@ -5,6 +5,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"xingmeng/internal/errs"
 	"xingmeng/internal/store"
 )
 
@@ -428,5 +430,76 @@ func TestS3BucketOps(t *testing.T) {
 	rec := doSigned(t, h, http.MethodGet, "/"+testBucket+"?location", nil, nil)
 	if rec.Code != 200 {
 		t.Fatalf("location: %d", rec.Code)
+	}
+}
+
+// TestS3DirMarkerDelete 目录标记删除回归（修复：DELETE 目录键曾回 404 NoSuchKey，
+// rclone/mc 把 404 当"已删除"报成功而目录实体残留——用户实测删不掉
+// SFTP/WebDAV 建立的目录）。S3 语义：删标记条目、子条目不动、键不存在幂等。
+func TestS3DirMarkerDelete(t *testing.T) {
+	h, s := newTestHandler(t)
+	ctx := context.Background()
+
+	// 空目录（树形协议建立的真实目录实体）→ DELETE "d1/" → 204 且条目消失
+	if err := s.Mkdir(ctx, testBucket, "d1"); err != nil {
+		t.Fatal(err)
+	}
+	if rec := doSigned(t, h, http.MethodDelete, "/"+testBucket+"/d1/", nil, nil); rec.Code != 204 {
+		t.Fatalf("empty dir marker delete: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := s.Stat(ctx, testBucket, "d1/"); !errors.Is(err, errs.ErrKeyNotFound) {
+		t.Fatalf("d1/ entry must be gone: %v", err)
+	}
+
+	// 非空目录 → 删标记 204；子条目保留；列表仍呈现 "d2/" 前缀（标准 S3 行为）
+	if err := s.Mkdir(ctx, testBucket, "d2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(ctx, testBucket, "d2/a.txt", strings.NewReader("x"), store.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := doSigned(t, h, http.MethodDelete, "/"+testBucket+"/d2/", nil, nil); rec.Code != 204 {
+		t.Fatalf("non-empty dir marker delete: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := s.Stat(ctx, testBucket, "d2/a.txt"); err != nil {
+		t.Fatalf("child must survive marker delete: %v", err)
+	}
+	res, err := s.List(ctx, testBucket, "", "/", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixShown := false
+	for _, p := range res.CommonPrefixes {
+		if p == "d2/" {
+			prefixShown = true
+		}
+	}
+	if !prefixShown {
+		t.Fatalf("non-empty dir must still appear as common prefix: %+v", res.CommonPrefixes)
+	}
+
+	// 键不存在 → 幂等 204
+	if rec := doSigned(t, h, http.MethodDelete, "/"+testBucket+"/nope/", nil, nil); rec.Code != 204 {
+		t.Fatalf("missing key delete must be idempotent 204: %d", rec.Code)
+	}
+
+	// 批量删除同样生效
+	if err := s.Mkdir(ctx, testBucket, "d3"); err != nil {
+		t.Fatal(err)
+	}
+	body := `<Delete><Object><Key>d3/</Key></Object></Delete>`
+	rec := doSigned(t, h, http.MethodPost, "/"+testBucket+"?delete", []byte(body), nil)
+	if rec.Code != 200 {
+		t.Fatalf("multi delete: %d %s", rec.Code, rec.Body)
+	}
+	var dr deleteResponseXML
+	if err := xml.Unmarshal(rec.Body.Bytes(), &dr); err != nil {
+		t.Fatal(err)
+	}
+	if len(dr.Deleted) != 1 || dr.Deleted[0].Key != "d3/" || len(dr.Error) != 0 {
+		t.Fatalf("multi delete dir marker: %+v", dr)
+	}
+	if _, err := s.Stat(ctx, testBucket, "d3/"); !errors.Is(err, errs.ErrKeyNotFound) {
+		t.Fatalf("d3/ must be gone: %v", err)
 	}
 }
