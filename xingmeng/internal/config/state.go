@@ -10,11 +10,16 @@ import (
 // State 是运行态（node-state.json，99-D016）：配置文件只声明初值，
 // promote / serve / sync 等运行期变更持久化于此，重启时优先于配置。
 // 灾难重建（清元数据）时连带清空本文件，节点回到配置初值。
+// D023 增补：SyncAddr（最近生效的同步地址，重启自动恢复，不回落旧配置）；
+// ReplTokenSealed（经 admin API 设置的 repl token，base64(AES-GCM(KEK))，
+// 存 state 而非 meta.db——从节点 bootstrap 会整库替换 meta.db）。
 type State struct {
-	Role      string `json:"role"`  // master | slave
-	Epoch     uint32 `json:"epoch"` // op 生成 epoch
-	Serve     string `json:"serve"` // off | ro | rw
-	UpdatedAt int64  `json:"updated_at"`
+	Role            string `json:"role"`                        // master | slave
+	Epoch           uint32 `json:"epoch"`                       // op 生成 epoch
+	Serve           string `json:"serve"`                       // off | ro | rw
+	SyncAddr        string `json:"sync_addr,omitempty"`         // 最近一次 sync start 的主地址
+	ReplTokenSealed string `json:"repl_token_sealed,omitempty"` // 空 = 未运行时设置（回落 env/YAML 初值）
+	UpdatedAt       int64  `json:"updated_at"`
 }
 
 func statePath(dataDir string) string {

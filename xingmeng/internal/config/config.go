@@ -61,14 +61,19 @@ type Config struct {
 		MultipartAbortAfter time.Duration `yaml:"multipart_abort_after"`
 	}
 	Replication struct {
-		MasterAddr string `yaml:"master_addr"` // slave 用
-		Token      string `yaml:"token"`
+		MasterAddr string `yaml:"master_addr"` // slave 用（初值；运行态 SyncAddr 优先，99-D023）
+		Token      string `yaml:"token"`       // repl 面共享凭证（初值；为空 = 不监听复制面）
 	}
-	AdminToken string `yaml:"admin_token"` // admin 面凭证；空 = 不鉴权（开发绑 127.0.0.1）
-	Log        struct {
+	AdminToken     string `yaml:"admin_token"`     // admin 面凭证（必填，XM_ADMIN_TOKEN 优先）
+	PublicEndpoint string `yaml:"public_endpoint"` // 对外展示地址（WebUI 连接信息用；空 = 按请求推断）
+	WebUI          *bool  `yaml:"webui"`           // 内嵌管理页开关（默认开）
+	Log            struct {
 		Level string `yaml:"level"`
 	}
 }
+
+// WebUIEnabled 报告管理页是否启用（缺省 true，99-D023）。
+func (c *Config) WebUIEnabled() bool { return c.WebUI == nil || *c.WebUI }
 
 // Load 读取并校验配置，填充默认值（与 docs/05 一致）。
 func Load(path string) (*Config, error) {
@@ -87,15 +92,30 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
+// Defaults 返回全默认配置（无配置文件形态，99-D023：docker 拉起即用）。
+func Defaults() *Config {
+	c := &Config{}
+	c.applyDefaults()
+	if err := c.validate(); err != nil {
+		panic("default config must be valid: " + err.Error())
+	}
+	return c
+}
+
 func (c *Config) applyDefaults() {
 	if c.Node.Role == "" {
 		c.Node.Role = "master"
+	}
+	if c.Node.DataDir == "" {
+		c.Node.DataDir = "./var"
 	}
 	if c.Listeners.DataHTTP == "" {
 		c.Listeners.DataHTTP = "0.0.0.0:9000"
 	}
 	if c.Listeners.Admin == "" {
-		c.Listeners.Admin = "127.0.0.1:9002"
+		// 0.0.0.0：docker 形态默认可用（admin token 必填即安全，99-D023②）；
+		// 裸机想只留本机访问可显式配 127.0.0.1。
+		c.Listeners.Admin = "0.0.0.0:9002"
 	}
 	if c.Listeners.Repl == "" {
 		c.Listeners.Repl = "0.0.0.0:9003"
@@ -133,9 +153,8 @@ func (c *Config) validate() error {
 	if c.Node.DataDir == "" {
 		return fmt.Errorf("node.data_dir is required")
 	}
-	if c.Node.Role == "slave" && c.Replication.MasterAddr == "" {
-		return fmt.Errorf("slave requires replication.master_addr")
-	}
+	// slave 无 master_addr 允许启动（99-D023：空转安全，serve 恒 off，
+	// 地址可后经 admin API 设置并持久化于运行态）。
 	return nil
 }
 
@@ -149,4 +168,51 @@ func (c *Config) NodeID() string {
 		return "node-1"
 	}
 	return h
+}
+
+// ApplyEnv 用 XM_* 环境变量覆盖配置初值（99-D023 优先级：运行态 > env > YAML > 默认）。
+// env 是 docker 形态的出生配置面（MySQL root 密码模式）；返回被覆盖的键便于启动日志展示。
+func ApplyEnv(c *Config) ([]string, error) {
+	applied := []string{}
+	if v := os.Getenv("XM_DATA_DIR"); v != "" {
+		c.Node.DataDir = v
+		applied = append(applied, "XM_DATA_DIR")
+	}
+	if v := os.Getenv("XM_ROLE"); v != "" {
+		if v != "master" && v != "slave" {
+			return nil, fmt.Errorf("XM_ROLE must be master or slave, got %q", v)
+		}
+		c.Node.Role = v
+		applied = append(applied, "XM_ROLE")
+	}
+	if v := os.Getenv("XM_ADMIN_TOKEN"); v != "" {
+		c.AdminToken = v
+		applied = append(applied, "XM_ADMIN_TOKEN")
+	}
+	if v := os.Getenv("XM_REPL_TOKEN"); v != "" {
+		c.Replication.Token = v
+		applied = append(applied, "XM_REPL_TOKEN")
+	}
+	if v := os.Getenv("XM_MASTER_ADDR"); v != "" {
+		c.Replication.MasterAddr = v
+		applied = append(applied, "XM_MASTER_ADDR")
+	}
+	if v := os.Getenv("XM_PUBLIC_ENDPOINT"); v != "" {
+		c.PublicEndpoint = v
+		applied = append(applied, "XM_PUBLIC_ENDPOINT")
+	}
+	if v := os.Getenv("XM_WEBUI"); v != "" {
+		switch strings.ToLower(v) {
+		case "on", "1", "true":
+			t := true
+			c.WebUI = &t
+		case "off", "0", "false":
+			f := false
+			c.WebUI = &f
+		default:
+			return nil, fmt.Errorf("XM_WEBUI must be on|off, got %q", v)
+		}
+		applied = append(applied, "XM_WEBUI")
+	}
+	return applied, nil
 }

@@ -1,16 +1,18 @@
-# 星梦存储节点配置示例（docs/05）。复制到部署目录改后使用。
+# 星梦存储节点配置示例（docs/05）。复制到部署目录改后使用；
+# docker 形态可不带配置文件（全默认 + XM_* env，99-D023）。
 # KEK 不在此文件：仅从环境变量 XM_KEK 读取（开发期 .env，见 .env.example）。
+# 优先级：运行态(node-state.json) > XM_* env > 本文件 > 默认值。
 
 node:
-  role: master            # master | slave（初值；运行期变更持久化于 node-state.json）
+  role: master            # master | slave（仅出生初值；运行态优先，promote 后改这里无效）
   id: node-1              # 从节点标识，缺省 hostname
-  data_dir: ./var
+  data_dir: ./var         # 缺省 ./var；docker 形态用 XM_DATA_DIR
 
 listeners:
-  data_http: 0.0.0.0:9000   # S3（根路径，path-style）
-  data_ssh: 0.0.0.0:9001    # SFTP（适配实现后启用）
-  admin: 127.0.0.1:9002     # 管理面（上公网前务必加 admin_token 或绑内网）
-  repl: 0.0.0.0:9003        # 复制面
+  data_http: 0.0.0.0:9000   # S3（根路径，path-style）+ WebDAV（/dav/<bucket>）
+  data_ssh: 0.0.0.0:9001    # SFTP（留空 = 不启用；docker 镜像默认 YAML 已启用）
+  admin: 0.0.0.0:9002       # admin API + WebUI（admin token 必填；仅本机管理可改 127.0.0.1）
+  repl: 0.0.0.0:9003        # 复制面（repl token 为空时不监听，99-D023③）
 
 storage:
   blob_small_threshold: 4MB
@@ -22,9 +24,11 @@ storage:
   multipart_abort_after: 168h
 
 replication:
-  master_addr: ""           # slave 填，如 http://10.0.0.2:9003
-  token: ""                 # 复制面共享凭证
+  master_addr: ""           # 从节点初值；可后经 POST /sync 设置并持久化（运行态优先）
+  token: ""                 # repl 面共享凭证初值；主从同值；为空 = 不监听复制面
 
-admin_token: ""             # admin 面凭证；空 = 不鉴权（仅限开发绑 127.0.0.1）
+admin_token: ""             # 建议 XM_ADMIN_TOKEN；两者皆空 = 拒绝启动（99-D023②）
+public_endpoint: ""         # WebUI 连接信息展示用（如 http://storage.example.com:9000）
+webui: true                 # 内嵌管理页开关（XM_WEBUI=off 同效）
 log:
   level: info

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星梦存储 · 节点管理</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--line:#e3e6ea;--tx:#1c2329;--sub:#6b7480;--acc:#2563eb;--ok:#16a34a;--warn:#d97706;--bad:#dc2626}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif;background:var(--bg);color:var(--tx)}
+header{display:flex;align-items:center;gap:12px;padding:10px 20px;background:#111827;color:#fff}
+header h1{font-size:16px;margin:0;font-weight:600}
+header .sp{flex:1}
+.badge{padding:2px 10px;border-radius:999px;font-size:12px;background:#374151}
+.badge.master{background:#1d4ed8}.badge.slave{background:#7c3aed}
+#sess-info{font-size:12px;color:#9ca3af}
+button{font:inherit;padding:5px 14px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer}
+button:hover{border-color:var(--acc);color:var(--acc)}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button.primary:hover{opacity:.9;color:#fff}
+button.danger{color:var(--bad);border-color:#f3c1c1}
+button.danger:hover{background:#fef2f2;border-color:var(--bad)}
+button:disabled{opacity:.5;cursor:not-allowed}
+input,select{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
+main{max-width:1000px;margin:24px auto;padding:0 16px}
+nav{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--line)}
+nav button{border:none;border-radius:6px 6px 0 0;background:none;color:var(--sub);padding:8px 16px}
+nav button.on{color:var(--acc);font-weight:600;box-shadow:inset 0 -2px var(--acc)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin-bottom:16px}
+.card h3{margin:0 0 12px;font-size:14px;color:var(--sub);font-weight:600}
+table{width:100%;border-collapse:collapse}
+th,td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--line);font-size:13px}
+th{color:var(--sub);font-weight:500}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.hint{color:var(--sub);font-size:12px}
+.banner{padding:10px 14px;border-radius:8px;margin-bottom:12px;font-size:13px}
+.banner.warn{background:#fef3c7;border:1px solid #f5d98f;color:#92400e}
+.banner.err{background:#fee2e2;border:1px solid #f3b6b6;color:#991b1b}
+pre{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;font-size:12px;position:relative}
+.copy{position:absolute;top:6px;right:6px;font-size:12px;padding:2px 10px;background:#334155;color:#e2e8f0;border:none;border-radius:4px}
+.kv{display:grid;grid-template-columns:180px 1fr;gap:4px 12px;font-size:13px}
+.kv b{color:var(--sub);font-weight:500}
+code{background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px}
+#login{max-width:420px;margin:80px auto}
+#login .card{padding:28px}
+.tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px}
+.tag.ok{background:#dcfce7;color:#166534}.tag.off{background:#f1f5f9;color:#64748b}
+.muted{color:var(--sub)}
+</style>
+</head>
+<body>
+<header>
+  <h1>星梦存储 · 节点管理</h1>
+  <span id="h-role" class="badge" style="display:none"></span>
+  <span class="sp"></span>
+  <span id="sess-info"></span>
+  <button id="btn-logout" style="display:none">登出</button>
+</header>
+
+<div id="login">
+  <div class="card">
+    <h3>管理员登录</h3>
+    <p class="hint">用 admin token 换取短时会话 token（1–24 小时自选）。会话仅存于本页与节点内存，登出/到期即失效。</p>
+    <div class="row"><input id="l-tok" type="password" placeholder="admin token（XM_ADMIN_TOKEN）" style="flex:1" autocomplete="off"></div>
+    <div class="row">
+      会话时长 <select id="l-ttl"><option value="1">1 小时</option><option value="4">4 小时</option><option value="8" selected>8 小时</option><option value="24">24 小时</option></select>
+      <button class="primary" id="btn-login">登录</button>
+    </div>
+    <div id="l-err" class="banner err" style="display:none"></div>
+  </div>
+</div>
+
+<main id="app" style="display:none">
+  <div id="role-mismatch" class="banner warn" style="display:none"></div>
+  <nav id="tabs">
+    <button data-t="ov" class="on">概览</button>
+    <button data-t="bk">存储桶</button>
+    <button data-t="cr">凭据</button>
+    <button data-t="op">运维</button>
+    <button data-t="cl">集群</button>
+    <button data-t="cn">连接</button>
+  </nav>
+
+  <section id="t-ov">
+    <div class="card"><h3>节点状态</h3><div class="kv" id="ov-kv"></div></div>
+    <div class="card"><h3>存储桶用量</h3><table id="ov-bk"><thead><tr><th>桶</th><th>用量</th><th>对象数</th><th>在途(pending)</th><th>配额</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="t-bk" style="display:none">
+    <div class="card"><h3>新建存储桶</h3>
+      <div class="row">名称 <input id="bk-name" placeholder="小写字母/数字/连字符，3-63 位"> 配额(GB，留空不限) <input id="bk-quota" style="width:90px"> <button class="primary" id="bk-add">创建</button></div>
+      <p class="hint">桶名规则与 S3 一致；配额按逻辑字节计（含 multipart 在途）。</p></div>
+    <div class="card"><h3>存储桶列表</h3><table id="bk-tb"><thead><tr><th>桶</th><th>用量</th><th>对象数</th><th>配额(GB)</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="t-cr" style="display:none">
+    <div class="card"><h3>新建凭据</h3>
+      <div class="row">AccessKey <input id="cr-ak" placeholder="4-64 位字母数字"> 桶 <select id="cr-bk"></select> Secret <input id="cr-sk" placeholder="留空自动生成" type="password"> <button class="primary" id="cr-add">创建</button></div>
+      <p class="hint">凭据绑定单个桶（三协议租户隔离）；Secret 服务端生成时仅创建这一次展示。</p></div>
+    <div class="card"><h3>凭据列表</h3><table id="cr-tb"><thead><tr><th>AccessKey</th><th>桶</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="t-op" style="display:none">
+    <div class="card"><h3>数据面模式（serve）</h3>
+      <div class="row">
+        <span id="op-serve-now"></span>
+        <button data-mode="off">停服 off</button><button data-mode="ro">只读 ro</button><button data-mode="rw" class="primary">读写 rw</button>
+      </div><p class="hint">仅主节点可调；从节点恒 off。灾备标准动作：promote 后先 ro 冒烟，确认后开 rw。</p></div>
+    <div class="card"><h3>同步（从节点）</h3>
+      <div class="row"><span id="op-sync-now"></span> 主节点地址 <input id="op-sync-addr" placeholder="http://master:9003" style="width:220px"> <button id="op-sync-start">启动同步</button> <button id="op-sync-stop">停止同步</button></div>
+      <p class="hint">地址留空 = 沿用最近一次生效地址（重启自动恢复，不回落旧配置）。</p></div>
+    <div class="card"><h3>提升为主节点（promote · runbook A3）</h3>
+      <p class="hint">前置：本节点为从、同步已停。执行后 role=master、epoch+1、serve=ro。这是危险操作，请对照 docs/03 灾备手册逐条确认。</p>
+      <button class="danger" id="op-promote">执行提升</button></div>
+    <div class="card"><h3>维护动作</h3>
+      <div class="row"><button id="op-snapshot">生成快照</button> <button id="op-gc">执行一次 GC</button> 对账抽样条数 <input id="op-verify-n" value="100" style="width:70px"> <button id="op-verify">抽样对账</button></div>
+      <pre id="op-out" style="display:none"></pre></div>
+  </section>
+
+  <section id="t-cl" style="display:none">
+    <div class="card"><h3>复制面凭证（repl token）</h3>
+      <div class="kv" id="cl-kv"></div>
+      <div class="row">新 token <input id="cl-tok" type="password" placeholder="≥8 位；主从节点填同值" style="width:240px"> <button class="primary" id="cl-set">设置</button> <button class="danger" id="cl-clear">清除(回落初始值)</button></div>
+      <p class="hint">运行时设置持久化于本节点（KEK 封装），优先级高于环境变量初值；为空则不监听复制面。主从需同值；运行中的同步需停止/重启后生效。</p></div>
+  </section>
+
+  <section id="t-cn" style="display:none">
+    <div class="card"><h3>服务端点</h3><div class="kv" id="cn-kv"></div>
+      <p class="hint">未设置 XM_PUBLIC_ENDPOINT 时按当前访问地址推断端口；docker 端口映射后请以实际映射为准。</p></div>
+    <div class="card"><h3>客户端配置片段</h3>
+      <p class="hint">选择桶并填入该桶的凭据后生成；请用 mc / rclone / WinSCP 等工具操作对象，本页不提供文件管理。</p>
+      <div class="row">桶 <select id="cn-bk"></select> AccessKey <input id="cn-ak" placeholder="凭据 AK" style="width:140px"> Secret <input id="cn-sk" type="password" placeholder="凭据 SK" style="width:140px"></div>
+      <h3 style="margin-top:14px">mc（MinIO Client）</h3><pre id="cn-mc"></pre>
+      <h3 style="margin-top:14px">rclone（环境变量式配置）</h3><pre id="cn-rclone"></pre>
+      <h3 style="margin-top:14px">WinSCP / SFTP</h3><pre id="cn-sftp"></pre>
+    </div>
+  </section>
+</main>
+
+<div id="toast" style="position:fixed;bottom:24px;right:24px;display:none;background:#111827;color:#fff;padding:8px 16px;border-radius:8px;font-size:13px"></div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
+let SESS=null, EXPIRES=0, timer=null;
+
+function toast(msg,ok=true){const t=$("#toast");t.textContent=msg;t.style.background=ok?"#111827":"#991b1b";t.style.display="block";clearTimeout(t._h);t._h=setTimeout(()=>t.style.display="none",2600)}
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function fmtB(n){if(n==null)return"-";const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(i?1:0)+" "+u[i]}
+function copyBtn(pre){const b=document.createElement("button");b.className="copy";b.textContent="复制";b.onclick=()=>{navigator.clipboard.writeText(pre.innerText).then(()=>{b.textContent="已复制";setTimeout(()=>b.textContent="复制",1500)})};pre.appendChild(b)}
+function addCopy(){$$("#app pre").forEach(p=>{if(!p.querySelector(".copy"))copyBtn(p)})}
+
+// ---- API 封装：会话 token 直调 admin 面（同源）----
+async function api(method,path,body,adminTok){
+  const h={};
+  if(adminTok)h["X-Xm-Token"]=adminTok;else if(SESS)h["X-Xm-Session"]=SESS;
+  const r=await fetch(path,{method,headers:h,body:body!==undefined?JSON.stringify(body):undefined});
+  if(r.status===401&&!adminTok){logout();throw new Error("会话已失效，请重新登录")}
+  const txt=await r.text();let d={};try{d=txt?JSON.parse(txt):{}}catch(e){}
+  if(!r.ok)throw new Error(d.error||("HTTP "+r.status));
+  return d;
+}
+const confirmDo=async(msg,fn)=>{if(!window.confirm(msg))return;try{const d=await fn();toast(typeof d==="string"?d:"执行成功");return d}catch(e){toast(e.message,false)}};
+
+// ---- 会话 ----
+function saveSess(tok,exp){SESS=tok;EXPIRES=exp*1000;sessionStorage.setItem("xm",JSON.stringify({tok,exp}))}
+function restoreSess(){try{const s=JSON.parse(sessionStorage.getItem("xm"));if(s&&s.exp*1000>Date.now()){SESS=s.tok;EXPIRES=s.exp*1000;return true}}catch(e){}return false}
+function logout(){SESS=null;EXPIRES=0;sessionStorage.removeItem("xm");clearInterval(timer);$("#app").style.display="none";$("#login").style.display="block";$("#btn-logout").style.display="none";$("#sess-info").textContent="";$("#h-role").style.display="none"}
+function tick(){if(!EXPIRES)return;const ms=EXPIRES-Date.now();if(ms<=0){logout();return}
+  const m=Math.floor(ms/60000),h=Math.floor(m/60);$("#sess-info").textContent=`会话剩余 ${h?h+" 小时 ":""}${m%60} 分`}
+async function login(){
+  const tok=$("#l-tok").value.trim(),ttl=+$("#l-ttl").value;
+  $("#l-err").style.display="none";
+  try{const d=await api("POST","/auth/session",{ttl_hours:ttl},tok);
+    saveSess(d.token,d.expires_at);$("#l-tok").value="";enter();
+  }catch(e){$("#l-err").textContent="登录失败："+e.message;$("#l-err").style.display="block"}}
+function logoutCall(){api("DELETE","/auth/session").catch(()=>{}).finally(logout)}
+
+async function enter(){
+  $("#login").style.display="none";$("#app").style.display="block";$("#btn-logout").style.display="";
+  clearInterval(timer);timer=setInterval(tick,30000);tick();
+  await refreshAll();
+}
+
+// ---- 概览/集群共用的状态 ----
+let LAST=null;
+async function refreshAll(){
+  try{
+    const [st,bks]=await Promise.all([api("GET","/status"),api("GET","/buckets").catch(()=>[])]);
+    LAST={st,bks};
+    const role=st.node.role;
+    const rb=$("#h-role");rb.style.display="";rb.className="badge "+role;rb.textContent=role==="master"?"主节点":"从节点";
+    const rm=$("#role-mismatch");
+    if(st.node.role_mismatch){rm.style.display="";rm.innerHTML=`运行角色与配置初值不一致：节点以 <b>${esc(role)}</b> 运行（初值 ${esc(st.node.configured_role)}）。初值仅是出生设置，promote 后属正常现象，无需处理（99-D023）。`}
+    else rm.style.display="none";
+    renderOv();renderBk();renderCr();renderOp();renderCl();renderCn();
+    fillBkSelects();
+  }catch(e){toast(e.message,false)}
+}
+
+function renderOv(){
+  const n=LAST.st.node,kv=$("#ov-kv");const rows=[
+    ["角色 role",esc(n.role)+(n.role_mismatch?` <span class="muted">(初值 ${esc(n.configured_role)})</span>`:"")],
+    ["数据面 serve",`<span class="tag ${n.serve==="rw"?"ok":"off"}">${esc(n.serve)}</span>`],
+    ["epoch",n.epoch],["oplog last_seq",n.last_seq],
+    ["同步",n.sync_running?`运行中 → ${esc(n.sync_addr||"")}`:"未运行"],
+    ["KEK",n.kek_configured?'<span class="tag ok">已配置</span>':'<span class="tag off">缺失</span>'],
+    ["复制面 token",n.repl_token_configured?`已配置${n.repl_token_runtime?"（运行时设置）":"（初始值）"}`:"未配置（不监听复制面）"],
+    ["复制面监听",n.repl_listening?'<span class="tag ok">监听中</span>':'<span class="tag off">未监听</span>'],
+  ];
+  kv.innerHTML=rows.map(r=>`<b>${r[0]}</b><span>${r[1]}</span>`).join("");
+  $("#ov-bk tbody").innerHTML=LAST.bks.length?LAST.bks.map(b=>`<tr><td>${esc(b.Name||b.name)}</td><td>${fmtB(b.Used??b.used)}</td><td>${b.Objects??b.objects}</td><td>${fmtB(b.Pending??b.pending)}</td><td>${(b.Quota??b.quota)!=null?fmtB(b.Quota??b.quota):"不限"}</td></tr>`).join(""):`<tr><td colspan="5" class="muted">暂无桶</td></tr>`;
+}
+
+// ---- 桶 ----
+function renderBk(){
+  $("#bk-tb tbody").innerHTML=LAST.bks.length?LAST.bks.map(b=>{const q=(b.Quota??b.quota);return`<tr><td>${esc(b.Name||b.name)}</td><td>${fmtB(b.Used??b.used)}</td><td>${b.Objects??b.objects}</td><td>${q!=null?(q/2**30).toFixed(1):"不限"}</td>
+    <td><button onclick="bkQuota('${esc(b.Name||b.name)}',${q||"null"})">改配额</button> <button class="danger" onclick="bkDel('${esc(b.Name||b.name)}')">删除</button></td></tr>`}).join(""):`<tr><td colspan="5" class="muted">暂无桶</td></tr>`;
+}
+window.bkQuota=async(name,q)=>{const v=prompt(`桶 ${name} 的新配额（GB，留空=不限）`,q?(q/2**30).toFixed(0):"");if(v===null)return;
+  const body=v.trim()===""?{quota:null}:{quota:Math.round(parseFloat(v)*2**30)};
+  if(body.quota&&(isNaN(body.quota)||body.quota<=0)){toast("配额必须是正数",false);return}
+  try{await api("PATCH","/buckets/"+name,body);await refreshAll()}catch(e){toast(e.message,false)}};
+window.bkDel=async name=>{if(!confirm(`确认删除桶 ${name}？（仅能删除空桶）`))return;
+  try{await api("DELETE","/buckets/"+name);await refreshAll()}catch(e){toast(e.message,false)}};
+$("#bk-add").onclick=async()=>{const name=$("#bk-name").value.trim(),q=$("#bk-quota").value.trim();
+  const body={name};if(q)body.quota=Math.round(parseFloat(q)*2**30);
+  try{await api("POST","/buckets",body);$("#bk-name").value="";$("#bk-quota").value="";await refreshAll()}catch(e){toast(e.message,false)}};
+
+// ---- 凭据 ----
+let CREDS=[];
+async function renderCr(){
+  try{CREDS=await api("GET","/creds")}catch(e){CREDS=[]}
+  $("#cr-tb tbody").innerHTML=CREDS.length?CREDS.map(c=>`<tr><td><code>${esc(c.AccessKey||c.access_key)}</code></td><td>${esc(c.Bucket||c.bucket)}</td>
+    <td><button onclick="crRot('${esc(c.AccessKey||c.access_key)}')">轮换 Secret</button> <button class="danger" onclick="crDel('${esc(c.AccessKey||c.access_key)}')">删除</button></td></tr>`).join(""):`<tr><td colspan="3" class="muted">暂无凭据</td></tr>`;
+}
+window.crRot=async ak=>{if(!confirm(`轮换 ${ak} 的 Secret？旧 Secret 立即失效，新值仅展示一次。`))return;
+  try{const d=await api("POST",`/creds/${ak}/rotate`);
+    $("#op-out").style.display="";$("#op-out").textContent=`${ak} 的新 Secret（仅此一次展示，请立即保存）：\n${d.secret}`;addCopy();
+    toast("已轮换，新 Secret 见运维页输出区")}catch(e){toast(e.message,false)}};
+window.crDel=async ak=>{if(!confirm(`确认删除凭据 ${ak}？使用它的客户端将立即无法访问。`))return;
+  try{await api("DELETE","/creds/"+ak);await refreshAll()}catch(e){toast(e.message,false)}};
+$("#cr-add").onclick=async()=>{
+  const ak=$("#cr-ak").value.trim(),bk=$("#cr-bk").value,sk=$("#cr-sk").value;
+  if(!bk){toast("请先创建桶",false);return}
+  const body={access_key:ak,bucket:bk};if(sk)body.secret=sk;
+  try{const d=await api("POST","/creds",body);
+    $("#cr-ak").value="";$("#cr-sk").value="";
+    if(d.secret){$("#op-out").style.display="";$("#op-out").textContent=`${ak} 的 Secret（仅此一次展示，请立即保存）：\n${d.secret}`;addCopy()}
+    await refreshAll()}catch(e){toast(e.message,false)}};
+
+// ---- 运维 ----
+function renderOp(){
+  const n=LAST.st.node;
+  $("#op-serve-now").innerHTML=`当前：<span class="tag ${n.serve==="rw"?"ok":"off"}">${esc(n.serve)}</span>`;
+  $("#op-sync-now").innerHTML=`当前：${n.sync_running?`<span class="tag ok">运行中</span> → ${esc(n.sync_addr||"")}`:'<span class="tag off">未运行</span>'}`;
+}
+$$("#t-op [data-mode]").forEach(b=>b.onclick=async()=>{
+  const m=b.dataset.mode;
+  if(!confirm(`切换数据面模式为 ${m}？${m==="off"?"所有客户端立即不可访问。":m==="ro"?"写入将被拒绝。":"开放读写。"}`))return;
+  try{await api("POST","/serve",{mode:m});await refreshAll()}catch(e){toast(e.message,false)}});
+$("#op-sync-start").onclick=async()=>{const addr=$("#op-sync-addr").value.trim();
+  const body={action:"start"};if(addr)body.master_addr=addr;
+  try{await api("POST","/sync",body);await refreshAll()}catch(e){toast(e.message,false)}};
+$("#op-sync-stop").onclick=async()=>{try{await api("POST","/sync",{action:"stop"});await refreshAll()}catch(e){toast(e.message,false)}};
+$("#op-promote").onclick=async()=>{
+  if(!confirm("危险操作。请确认已对照 docs/03 灾备手册：\n\n1. 原主节点已确认离线\n2. 本节点同步已停止\n3. 你了解执行后 epoch+1、serve=ro\n\n继续？"))return;
+  if(!confirm("再次确认：真的要提升本节点为主节点吗？"))return;
+  try{const d=await api("POST","/promote");toast(`已提升：epoch=${d.epoch}，serve=${d.serve}（先只读冒烟，确认后在上方开 rw）`);await refreshAll()}catch(e){toast(e.message,false)}};
+const showOut=(label,d)=>{$("#op-out").style.display="";$("#op-out").textContent=label+"\n"+JSON.stringify(d,null,2);addCopy()};
+$("#op-snapshot").onclick=async()=>{try{showOut("快照：",await api("POST","/snapshot"))}catch(e){toast(e.message,false)}};
+$("#op-gc").onclick=async()=>{if(!confirm("执行一次标记-清扫 GC？"))return;try{showOut("GC：",await api("POST","/gc"))}catch(e){toast(e.message,false)}};
+$("#op-verify").onclick=async()=>{try{showOut("抽样对账：",await api("POST","/verify",{limit:+$("#op-verify-n").value||100}))}catch(e){toast(e.message,false)}};
+
+// ---- 集群 ----
+function renderCl(){
+  const n=LAST.st.node,kv=$("#cl-kv");
+  kv.innerHTML=[
+    ["生效 token",n.repl_token_configured?`已配置${n.repl_token_runtime?"（运行时设置，优先于初值）":"（env/YAML 初值）"}`:"未配置"],
+    ["复制面监听",n.repl_listening?'<span class="tag ok">监听中</span>':'<span class="tag off">未监听</span>'],
+    ["同步目标",esc(n.sync_addr||"—")],
+  ].map(r=>`<b>${r[0]}</b><span>${r[1]}</span>`).join("");
+}
+$("#cl-set").onclick=async()=>{const t=$("#cl-tok").value;if(t.length<8){toast("token 至少 8 位",false);return}
+  if(!confirm("设置复制面 token？集群内主从节点需填同值。"))return;
+  try{const d=await api("POST","/repl/token",{token:t});$("#cl-tok").value="";toast(d.hint||"已设置");await refreshAll()}catch(e){toast(e.message,false)}};
+$("#cl-clear").onclick=async()=>{if(!confirm("清除运行时 token？（回落 env/YAML 初值；初值也为空则停止监听复制面）"))return;
+  try{const d=await api("DELETE","/repl/token");toast(d.hint||"已清除");await refreshAll()}catch(e){toast(e.message,false)}};
+
+// ---- 连接 ----
+function fillBkSelects(){const opts=LAST.bks.map(b=>`<option>${esc(b.Name||b.name)}</option>`).join("");
+  $("#cr-bk").innerHTML=opts||`<option value="">（请先建桶）</option>`;$("#cn-bk").innerHTML=opts||`<option value="">（无桶）</option>`}
+function baseUrls(){
+  const n=LAST.st.node,pe=n.public_endpoint;
+  let host=location.hostname;
+  if(pe){try{const u=new URL(pe);host=u.hostname}catch(e){}}
+  return{s3:pe||`http://${host}:9000`,dav:(pe||`http://${host}:9000`)+"/dav",sftpHost:host};
+}
+function renderCn(){
+  const{s3,dav,sftpHost}=baseUrls(),kv=$("#cn-kv");
+  kv.innerHTML=[["S3 / WebDAV",`<code>${esc(s3)}</code>（WebDAV 挂载路径 <code>${esc(dav)}/&lt;bucket&gt;</code>）`],
+    ["SFTP",`<code>${esc(sftpHost)}:9001</code>`],["对外地址",esc(LAST.st.node.public_endpoint||"未设置（按访问地址推断）")]]
+    .map(r=>`<b>${r[0]}</b><span>${r[1]}</span>`).join("");
+  renderSnip();
+}
+function renderSnip(){
+  const{s3,dav,sftpHost}=baseUrls(),bk=$("#cn-bk").value,ak=$("#cn-ak").value.trim()||"<AK>";
+  $("#cn-mc").textContent=`mc alias set xm ${s3} ${ak} '<SK>'\nmc ls xm/${bk}\nmc cp ./file.bin xm/${bk}/`;
+  $("#cn-rclone").textContent=
+`export RCLONE_CONFIG_XM_TYPE=s3 \\
+RCLONE_CONFIG_XM_ENDPOINT=${s3} \\
+RCLONE_CONFIG_XM_ACCESS_KEY_ID=${ak} \\
+RCLONE_CONFIG_XM_SECRET_ACCESS_KEY='<SK>' \\
+RCLONE_CONFIG_XM_PATH_STYLE=true
+rclone copy ./file.bin xm:${bk}/
+# WebDAV 形态：RCLONE_CONFIG_XM_TYPE=webdav RCLONE_CONFIG_XM_URL=${dav}/${bk} \\
+#   RCLONE_CONFIG_XM_VENDOR=other RCLONE_CONFIG_XM_USER=${ak} RCLONE_CONFIG_XM_PASS=$(rclone obscure '<SK>')`;
+  $("#cn-sftp").textContent=`主机 ${sftpHost}   端口 9001   用户名 ${ak}   密码 <SK>\n登录后根目录即桶 ${bk||"<bucket>"}（凭据绑定桶即租户隔离）`;
+  addCopy();
+}
+$("#cn-bk").onchange=$("#cn-ak").oninput=renderSnip;
+
+// ---- 标签页 ----
+$("#tabs").onclick=e=>{const b=e.target.closest("button");if(!b)return;
+  $$("#tabs button").forEach(x=>x.classList.toggle("on",x===b));
+  ["ov","bk","cr","op","cl","cn"].forEach(t=>$("#t-"+t).style.display=t===b.dataset.t?"":"none")};
+
+$("#btn-login").onclick=login;
+$("#l-tok").addEventListener("keydown",e=>{if(e.key==="Enter")login()});
+$("#btn-logout").onclick=()=>{if(confirm("登出当前会话？"))logoutCall()};
+if(restoreSess())enter();
+</script>
+</body>
+</html>

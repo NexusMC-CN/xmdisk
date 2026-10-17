@@ -1,5 +1,6 @@
 // Package api 是 HTTP 路由组挂载点（docs/04 监听面；用户路由习惯：
-// main 挂路由组，路由组挂鉴权+业务，鉴权后补——AdminToken 非空即启用鉴权）。
+// main 挂路由组，路由组挂鉴权+业务）。admin 面鉴权为双 token（99-D023⑤），
+// admin token 必填（空 = 路由整体 503，main 层拒启兜底）。
 package api
 
 import (
@@ -12,11 +13,29 @@ import (
 
 	"xingmeng/internal/errs"
 	"xingmeng/internal/node"
+	"xingmeng/internal/webui"
 )
 
+// RouterConfig admin 面路由配置。
+type RouterConfig struct {
+	AdminToken string // 必填；缺失 = 路由整体 503（99-D023②）
+	WebUI      bool   // 是否挂内嵌管理页（XM_WEBUI，默认开）
+}
+
 // AdminRouter 返回 admin 面路由（docs/04 admin API 一节）。
-func AdminRouter(n *node.Node, token string) http.Handler {
+func AdminRouter(n *node.Node, rc RouterConfig) http.Handler {
+	if rc.AdminToken == "" {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error": "admin token not configured; set XM_ADMIN_TOKEN (required, 99-D023)"})
+		})
+	}
+	sess := newSessionStore()
 	mux := http.NewServeMux()
+	// 会话面（仅 admin token 可签发/全清；登出为会话自吊销）
+	mux.HandleFunc("POST /auth/session", adminAuth(rc.AdminToken, handleIssueSession(sess)))
+	mux.HandleFunc("DELETE /auth/session", handleLogout(sess))
+	mux.HandleFunc("DELETE /auth/sessions", adminAuth(rc.AdminToken, handleRevokeAll(sess)))
 	mux.HandleFunc("GET /status", handleStatus(n))
 	mux.HandleFunc("GET /health", handleHealth(n))
 	mux.HandleFunc("GET /metrics", handleMetrics(n))
@@ -34,17 +53,18 @@ func AdminRouter(n *node.Node, token string) http.Handler {
 	mux.HandleFunc("POST /creds", handleCreateCred(n))
 	mux.HandleFunc("POST /creds/{ak}/rotate", handleRotateCred(n))
 	mux.HandleFunc("DELETE /creds/{ak}", handleDeleteCred(n))
-	return auth(token, mux)
-}
+	// 集群配置（99-D023③：token 运行时设置，地址经 /sync）
+	mux.HandleFunc("POST /repl/token", handleSetReplToken(n))
+	mux.HandleFunc("DELETE /repl/token", handleSetReplToken(n))
 
-func auth(token string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if token != "" && r.Header.Get("X-Xm-Token") != token {
-			writeJSON(w, 401, map[string]any{"error": "bad or missing admin token"})
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	// 管理页在鉴权之外（登录页必须先可见才能换会话；静态资源无秘密，99-D023⑥），
+	// 其余全部走双 token 鉴权。
+	root := http.NewServeMux()
+	if rc.WebUI {
+		root.Handle("GET /{$}", webui.Handler())
+	}
+	root.Handle("/", auth(rc.AdminToken, sess, mux))
+	return root
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -142,7 +162,10 @@ xm_oplog_last_seq %d
 # HELP xm_sync_running 1 if slave sync loop running
 # TYPE xm_sync_running gauge
 xm_sync_running %d
-`, roleGauge, serveGauge, st.Epoch, st.LastSeq, boolToInt(st.SyncRunning))
+# HELP xm_repl_listening 1 if repl face listening (master with repl token)
+# TYPE xm_repl_listening gauge
+xm_repl_listening %d
+`, roleGauge, serveGauge, st.Epoch, st.LastSeq, boolToInt(st.SyncRunning), boolToInt(st.ReplListening))
 		buckets, err := n.Store().ListBucketStats(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -402,5 +425,34 @@ func handleDeleteCred(n *node.Node) http.HandlerFunc {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// ---- 集群配置（99-D023③）----
+
+// handleSetReplToken POST 设置运行时 repl token；DELETE 清除（回落 env/YAML 初值）。
+// 运行中的同步循环持旧 token，需 stop/start 生效——响应带提示。
+func handleSetReplToken(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := ""
+		if r.Method == http.MethodPost {
+			var req struct {
+				Token string `json:"token"`
+			}
+			if err := readJSON(r, &req); err != nil {
+				fail(w, err)
+				return
+			}
+			token = req.Token
+		}
+		if err := n.SetReplToken(token); err != nil {
+			fail(w, err)
+			return
+		}
+		resp := map[string]any{"ok": true}
+		if n.SyncRunning() {
+			resp["hint"] = "sync is running; stop/start sync to apply the new token"
+		}
+		writeJSON(w, 200, resp)
 	}
 }

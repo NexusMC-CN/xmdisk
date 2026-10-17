@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,7 +35,9 @@ func (m *Master) Handler() http.Handler {
 
 func (m *Master) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if m.token != "" && r.Header.Get("X-Xm-Token") != m.token {
+		// 空 token 的"不鉴权"仅供包内测试直连形态；节点层保证空 token 不监听
+		// 复制面（99-D023③），线上不存在无凭证可达的复制面。
+		if m.token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Xm-Token")), []byte(m.token)) != 1 {
 			writeErr(w, http.StatusUnauthorized, "bad or missing token", false)
 			return
 		}

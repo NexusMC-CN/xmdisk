@@ -118,6 +118,13 @@ func (s *Store) ListCreds(ctx context.Context) ([]CredInfo, error) {
 }
 
 // seal/open：AES-256-GCM，key = SHA-256(KEK)，nonce 前置存储。
+
+// SealSecret / OpenSecret 导出 AES-GCM 封装：凭据与运行时 repl token 共用
+// 同一管线（99-D023；token 存 node-state.json，不进 meta.db）。
+func (s *Store) SealSecret(plaintext string) ([]byte, error) { return s.seal(plaintext) }
+
+func (s *Store) OpenSecret(ciphertext []byte) (string, error) { return s.open(ciphertext) }
+
 func (s *Store) seal(plaintext string) ([]byte, error) {
 	block, err := aes.NewCipher(sha256Sum(s.cfg.KEK))
 	if err != nil {

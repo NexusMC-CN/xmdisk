@@ -1,0 +1,7 @@
+# docker 默认配置（99-D023：角色/凭证/数据目录走 XM_* env，yaml 只管无 env 对应面的监听口）。
+# 挂载自定义配置：docker run ... xmd -config /your/xmd.yaml
+listeners:
+  data_http: 0.0.0.0:9000   # S3 + WebDAV
+  data_ssh: 0.0.0.0:9001    # SFTP
+  admin: 0.0.0.0:9002       # admin API + WebUI（admin token 必填）
+  repl: 0.0.0.0:9003        # 复制面（XM_REPL_TOKEN 为空时不监听）
