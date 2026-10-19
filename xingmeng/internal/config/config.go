@@ -50,6 +50,7 @@ type Config struct {
 		DataSSH  string `yaml:"data_ssh"` // SFTP 适配未实现，暂不监听
 		Admin    string `yaml:"admin"`
 		Repl     string `yaml:"repl"`
+		Public   string `yaml:"public"` // 公共读面（99-D024）：默认 0.0.0.0:9004，仅认桶公共标志
 	}
 	Storage struct {
 		BlobSmallThreshold  ByteSize      `yaml:"blob_small_threshold"`
@@ -119,6 +120,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Listeners.Repl == "" {
 		c.Listeners.Repl = "0.0.0.0:9003"
+	}
+	if c.Listeners.Public == "" {
+		// 99-D024：默认监听（无公共桶时永远 404，无害）；仅本机管理可改 127.0.0.1。
+		c.Listeners.Public = "0.0.0.0:9004"
 	}
 	if c.Storage.BlobSmallThreshold == 0 {
 		c.Storage.BlobSmallThreshold = 4 << 20

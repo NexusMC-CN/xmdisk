@@ -17,6 +17,7 @@ const (
 	OpBucketCreate = "bucket_create"
 	OpBucketDelete = "bucket_delete"
 	OpQuotaUpdate  = "quota_update"
+	OpBucketPublic = "bucket_public" // 桶公共读开关（99-D024）
 	OpEntryPut     = "entry_put"
 	OpEntryDelete  = "entry_delete"
 	OpTreeMove     = "tree_move"

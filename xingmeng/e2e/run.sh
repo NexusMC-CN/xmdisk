@@ -7,6 +7,7 @@ set -u
 export MSYS_NO_PATHCONV=1
 NET=xmnet; M=xmd-master; S=xmd-slave
 AK=E2EAK001; SK=e2e-secret-0123456789; BKT=e2ebkt
+PAK=E2EAK002; PSK=e2e-secret2-0123456789; PUBB=pubbkt; PUBTXT=pub-ok-0123456789
 KEK=e2e-kek-0123456789abcdef
 ADM=e2e-adm-tok-0123456789
 RTOK=e2e-repl-tok-0123456789
@@ -62,6 +63,20 @@ docker run --rm --network $NET --entrypoint sh minio/mc -c "
   mc stat xm/$BKT/mark-del/ >/dev/null &&
   mc rm xm/$BKT/mark-del/ >/dev/null &&
   ! mc stat xm/$BKT/mark-del/ >/dev/null 2>&1" || fail "dir marker delete"
+
+say "4c. 公共读面（99-D024）：匿名直链 / 私有桶与不存在同构 404 / Range / 无缓存头"
+docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/buckets -d "{\"name\":\"$PUBB\",\"public\":true}" | grep -q "$PUBB" || fail "create public bucket"
+docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/creds -d "{\"access_key\":\"$PAK\",\"secret\":\"$PSK\",\"bucket\":\"$PUBB\"}" | grep -q "$PAK" || fail "create pub cred"
+docker run --rm --network $NET --entrypoint sh minio/mc -c "
+  mc alias set xm http://xmd-master:9000 $PAK $PSK >/dev/null &&
+  echo $PUBTXT > /tmp/h.txt &&
+  mc cp /tmp/h.txt xm/$PUBB/hello.txt >/dev/null" || fail "upload to pubbkt"
+C=$(docker exec $M curl -s localhost:9004/$PUBB/hello.txt)
+[ "$C" = "$PUBTXT" ] || fail "public anon read (got: $C)"
+docker exec $M curl -s -o /dev/null -w "%{http_code}" localhost:9004/$BKT/hello.txt | grep -q 404 || fail "private bucket must 404"
+docker exec $M curl -s -o /dev/null -w "%{http_code}" localhost:9004/$PUBB/none.txt | grep -q 404 || fail "missing object must 404"
+docker exec $M curl -s -o /dev/null -w "%{http_code}" -H "Range: bytes=0-2" localhost:9004/$PUBB/hello.txt | grep -q 206 || fail "range must 206"
+if docker exec $M sh -c "curl -sI localhost:9004/$PUBB/hello.txt | grep -i cache-control"; then fail "must NOT emit cache-control"; fi
 
 say "5. 起从节点（env：XM_ROLE=slave + XM_MASTER_ADDR；repl token 同值）并等待追平"
 docker run -d --name $S --network $NET \

@@ -15,17 +15,19 @@ type Bucket struct {
 	Used      int64  // 逻辑字节（计费/配额口径）
 	Pending   int64  // multipart 在途
 	Objects   int64
+	Public    bool // 公共读开关（99-D024；仅公共读端口生效，S3/WebDAV/SFTP 永远要凭据）
 	CreatedNs int64
 }
 
 func getBucket(q rowQuerier, name string) (*Bucket, error) {
 	row := q.QueryRow(
-		`SELECT name, quota_bytes, used_bytes, pending_bytes, object_count, created_at FROM buckets WHERE name = ?`,
+		`SELECT name, quota_bytes, used_bytes, pending_bytes, object_count, public, created_at FROM buckets WHERE name = ?`,
 		name,
 	)
 	var b Bucket
 	var quota sql.NullInt64
-	if err := row.Scan(&b.Name, &quota, &b.Used, &b.Pending, &b.Objects, &b.CreatedNs); err != nil {
+	var pub int
+	if err := row.Scan(&b.Name, &quota, &b.Used, &b.Pending, &b.Objects, &pub, &b.CreatedNs); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("%w: bucket %q", errs.ErrBucketNotFound, name)
 		}
@@ -35,6 +37,7 @@ func getBucket(q rowQuerier, name string) (*Bucket, error) {
 		v := quota.Int64
 		b.Quota = &v
 	}
+	b.Public = pub != 0
 	return &b, nil
 }
 
@@ -78,5 +81,15 @@ func (t *Tx) SetQuota(name string, quota *int64) error {
 		q = *quota
 	}
 	_, err := t.tx.Exec(`UPDATE buckets SET quota_bytes = ? WHERE name = ?`, q, name)
+	return err
+}
+
+// SetBucketPublic 切换桶公共读标志（99-D024）。
+func (t *Tx) SetBucketPublic(name string, public bool) error {
+	v := 0
+	if public {
+		v = 1
+	}
+	_, err := t.tx.Exec(`UPDATE buckets SET public = ? WHERE name = ?`, v, name)
 	return err
 }

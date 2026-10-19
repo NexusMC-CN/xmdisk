@@ -468,3 +468,68 @@ func TestWebUIMount(t *testing.T) {
 		t.Fatalf("empty admin token router must 503, got %d", code)
 	}
 }
+
+// TestBucketPublicAPI 桶公共读的 admin 面与语义（99-D024）：建桶即公共、
+// PATCH 字段存在性（只动 public 不碰 quota）、GET 回显。
+func TestBucketPublicAPI(t *testing.T) {
+	ctx := context.Background()
+	n, err := node.Start(ctx, testConfig(t, "master", t.TempDir()+"/m", ""), []byte("pub-kek"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+	srv := httptest.NewServer(AdminRouter(n, RouterConfig{AdminToken: admTok}))
+	defer srv.Close()
+
+	// 建桶即公共
+	if code, out := adminCall(t, srv.URL, "POST", "/buckets", map[string]any{"name": "puba", "public": true}); code != 200 || out["public"] != true {
+		t.Fatalf("create public bucket: %d %v", code, out)
+	}
+	// 带配额的私有桶
+	if code, _ := adminCall(t, srv.URL, "POST", "/buckets", map[string]any{"name": "prva", "quota": 1073741824}); code != 200 {
+		t.Fatalf("create private bucket failed")
+	}
+
+	// PATCH 只动 public：quota 必须原样保留（字段存在性语义）
+	if code, out := adminCall(t, srv.URL, "PATCH", "/buckets/prva", map[string]any{"public": true}); code != 200 {
+		t.Fatalf("patch public: %d %v", code, out)
+	}
+	bs, _ := n.Store().BucketStat(ctx, "prva")
+	if !bs.Public || bs.Quota == nil || *bs.Quota != 1073741824 {
+		t.Fatalf("public toggle must not touch quota: %+v", bs)
+	}
+	// PATCH 空身体 → 400
+	if code, _ := adminCall(t, srv.URL, "PATCH", "/buckets/prva", map[string]any{}); code != 400 {
+		t.Fatalf("empty patch must 400, got %d", code)
+	}
+	// 关闭公共 + 回显
+	adminCall(t, srv.URL, "PATCH", "/buckets/prva", map[string]any{"public": false})
+	var list []map[string]any
+	if code := statusInto(t, srv.URL, "/buckets", &list); code != 200 {
+		t.Fatalf("list buckets: %d", code)
+	}
+	for _, b := range list {
+		if b["Name"] == "puba" && b["Public"] != true {
+			t.Fatalf("puba must show public: %v", b)
+		}
+		if b["Name"] == "prva" && b["Public"] != false {
+			t.Fatalf("prva must show private: %v", b)
+		}
+	}
+}
+
+// statusInto 把 JSON 数组响应解码进 out。
+func statusInto(t *testing.T, base, path string, out any) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, base+path, nil)
+	req.Header.Set("X-Xm-Token", admTok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp.StatusCode
+}

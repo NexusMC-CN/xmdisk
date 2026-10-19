@@ -5,3 +5,4 @@ listeners:
   data_ssh: 0.0.0.0:9001    # SFTP
   admin: 0.0.0.0:9002       # admin API + WebUI（admin token 必填）
   repl: 0.0.0.0:9003        # 复制面（XM_REPL_TOKEN 为空时不监听）
+  public: 0.0.0.0:9004      # 公共读面（99-D024：仅认桶公共标志；反代公共域名指向这里）

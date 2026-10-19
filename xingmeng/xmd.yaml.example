@@ -13,6 +13,7 @@ listeners:
   data_ssh: 0.0.0.0:9001    # SFTP（留空 = 不启用；docker 镜像默认 YAML 已启用）
   admin: 0.0.0.0:9002       # admin API + WebUI（admin token 必填；仅本机管理可改 127.0.0.1）
   repl: 0.0.0.0:9003        # 复制面（repl token 为空时不监听，99-D023③）
+  public: 0.0.0.0:9004      # 公共读面（99-D024：仅认桶公共标志；反代公共域名指向这里）
 
 storage:
   blob_small_threshold: 4MB

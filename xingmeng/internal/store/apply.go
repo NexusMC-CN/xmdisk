@@ -50,6 +50,9 @@ func applyOpTx(ctx context.Context, t *meta.Tx, op meta.Op) error {
 			!errors.Is(err, errs.ErrBucketExists) {
 			return err
 		}
+		if p.Public != nil && *p.Public { // 99-D024：建桶即公共（旧 op 无此字段=不动）
+			return t.SetBucketPublic(p.Name, true)
+		}
 		return nil
 
 	case meta.OpBucketDelete:
@@ -65,6 +68,16 @@ func applyOpTx(ctx context.Context, t *meta.Tx, op meta.Op) error {
 			return badPayload(op, err)
 		}
 		return t.SetQuota(p.Name, p.Quota)
+
+	case meta.OpBucketPublic:
+		var p bucketPayload
+		if err := json.Unmarshal([]byte(op.Payload), &p); err != nil {
+			return badPayload(op, err)
+		}
+		if p.Public == nil {
+			return badPayload(op, fmt.Errorf("bucket_public op without public flag"))
+		}
+		return t.SetBucketPublic(p.Name, *p.Public)
 
 	case meta.OpEntryPut:
 		e, err := parseEntryPut(op.Payload)

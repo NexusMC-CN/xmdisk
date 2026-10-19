@@ -80,7 +80,7 @@ func (h *Handler) bucketOp(w http.ResponseWriter, r *http.Request, bucket, reqID
 	q := r.URL.Query()
 	switch r.Method {
 	case http.MethodPut:
-		if err := h.store.CreateBucket(r.Context(), bucket, nil); err != nil {
+		if err := h.store.CreateBucket(r.Context(), bucket, nil, false); err != nil {
 			m := mapError(err)
 			writeXMLError(w, m.Status, m.Code, err.Error(), bucket, reqID)
 			return

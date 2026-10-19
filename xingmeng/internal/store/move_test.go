@@ -13,7 +13,7 @@ import (
 func TestMoveFile(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 
 	data := randBytes(t, 64<<10)
 	oi := mustPut(t, s, "bkt", "a/f1", data, PutOptions{Meta: map[string]string{"k": "v"}})
@@ -47,7 +47,7 @@ func TestMoveFile(t *testing.T) {
 func TestMoveFileOverwrite(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	mustPut(t, s, "bkt", "src", randBytes(t, 100<<10), PutOptions{})
 	mustPut(t, s, "bkt", "dst", randBytes(t, 40<<10), PutOptions{})
 	if err := s.Move(ctx, "bkt", "src", "dst"); err != nil {
@@ -62,7 +62,7 @@ func TestMoveFileOverwrite(t *testing.T) {
 func TestMoveTree(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	if err := s.Mkdir(ctx, "bkt", "d"); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -115,7 +115,7 @@ func mustOps(t *testing.T, s *Store) []meta.Op {
 func TestSetAttrs(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	oi := mustPut(t, s, "bkt", "f", []byte("hello"), PutOptions{ContentType: "text/plain"})
 
 	mode := uint32(0o600)

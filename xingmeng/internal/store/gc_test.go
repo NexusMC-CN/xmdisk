@@ -26,7 +26,7 @@ func countTrash(t *testing.T, s *Store) int {
 func TestGCTrashAndSweep(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 
 	c1 := randBytes(t, 64<<10)
 	c2 := randBytes(t, 64<<10)
@@ -72,7 +72,7 @@ func TestGCTrashAndSweep(t *testing.T) {
 func TestGCResurrect(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 
 	c := randBytes(t, 64<<10)
 	mustPut(t, s, "bkt", "k", c, PutOptions{})
@@ -108,7 +108,7 @@ func TestGCResurrect(t *testing.T) {
 func TestGCSlaveGate(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	mustPut(t, s, "bkt", "k1", randBytes(t, 64<<10), PutOptions{})
 	mustPut(t, s, "bkt", "k2", randBytes(t, 64<<10), PutOptions{})
 	s.Delete(ctx, "bkt", "k1")
@@ -153,7 +153,7 @@ func TestGCSlaveGate(t *testing.T) {
 func TestGCStaleUploads(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	now := time.Now().UnixNano()
 	s.cfg.MultipartAbortAfter = 24 * time.Hour
 

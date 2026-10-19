@@ -75,12 +75,13 @@ func main() {
 	}
 
 	// 数据面 HTTP 与 admin 面；repl 复制面由节点运行时按 token 有无管理（99-D023③），
-	// SSH/SFTP 为原生 TCP 监听。
+	// 公共读面独立只读端口（99-D024），SSH/SFTP 为原生 TCP 监听。
 	servers := []*http.Server{
 		listen(cfg.Listeners.DataHTTP, n.DataHandler(), "data-http"),
 		listen(cfg.Listeners.Admin, api.AdminRouter(n, api.RouterConfig{
 			AdminToken: cfg.AdminToken, WebUI: cfg.WebUIEnabled(),
 		}), "admin"),
+		listen(cfg.Listeners.Public, n.PublicHandler(), "public-read"),
 	}
 	if cfg.Listeners.DataSSH != "" {
 		sshLn, err := net.Listen("tcp", cfg.Listeners.DataSSH)

@@ -15,7 +15,7 @@ import (
 func TestMultipartLifecycle(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 
 	p1, p2, p3 := randBytes(t, 100<<10), randBytes(t, 50<<10), randBytes(t, 30<<10)
 	id, err := s.MpBegin(ctx, "bkt", "big.bin", PutOptions{ContentType: "application/x-test"})
@@ -83,7 +83,7 @@ func TestMultipartLifecycle(t *testing.T) {
 func TestMultipartCompleteValidation(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	p1, p2, p3 := randBytes(t, 16<<10), randBytes(t, 16<<10), randBytes(t, 16<<10)
 
 	id, _ := s.MpBegin(ctx, "bkt", "obj", PutOptions{})
@@ -122,7 +122,7 @@ func TestMultipartAbortAndQuota(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	quota := int64(1 << 20)
-	s.CreateBucket(ctx, "qta", &quota)
+	s.CreateBucket(ctx, "qta", &quota, false)
 
 	id, _ := s.MpBegin(ctx, "qta", "obj", PutOptions{})
 	if _, _, err := s.MpPut(ctx, id, 1, bytes.NewReader(randBytes(t, 600<<10))); err != nil {

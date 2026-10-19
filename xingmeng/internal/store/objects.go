@@ -21,8 +21,9 @@ import (
 // ---- oplog payload（全量状态 op，99-D003）----
 
 type bucketPayload struct {
-	Name  string `json:"name"`
-	Quota *int64 `json:"quota,omitempty"`
+	Name   string `json:"name"`
+	Quota  *int64 `json:"quota,omitempty"`
+	Public *bool  `json:"public,omitempty"` // 99-D024：nil = 不动（旧 op 回放兼容）
 }
 
 type entryPutPayload struct {

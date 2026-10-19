@@ -1,7 +1,7 @@
 package meta
 
 // schemas 按版本升序存放各版增量 DDL；schemas[i] 把库从 v i 升到 v i+1。
-var schemas = []string{schemaV1, schemaV2}
+var schemas = []string{schemaV1, schemaV2, schemaV3}
 
 // schemaV1：v1 全量建表。key 为 BLOB 以保原始字节字典序（S3 List 依赖）；
 // entries.Blobs / UserMeta 存 JSON 原文，由 store 层解释。
@@ -79,5 +79,10 @@ CREATE TABLE gc_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   last_mark_seq INTEGER NOT NULL DEFAULT 0
 );
-INSERT INTO gc_state(id, last_mark_seq) VALUES (1, 0);
+INSERT INTO gc_state(id, last_mark_seq) VALUES(1, 0);
+`
+
+// schemaV3：桶公共读标志（99-D024：默认关；开启=公共读端口可匿名 GET）。
+const schemaV3 = `
+ALTER TABLE buckets ADD COLUMN public INTEGER NOT NULL DEFAULT 0;
 `

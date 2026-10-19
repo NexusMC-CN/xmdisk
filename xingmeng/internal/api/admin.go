@@ -172,8 +172,8 @@ xm_repl_listening %d
 			return
 		}
 		for _, b := range buckets {
-			out += fmt.Sprintf("xm_bucket_used_bytes{bucket=%q} %d\nxm_bucket_objects{bucket=%q} %d\nxm_bucket_pending_bytes{bucket=%q} %d\n",
-				b.Name, b.Used, b.Name, b.Objects, b.Name, b.Pending)
+			out += fmt.Sprintf("xm_bucket_used_bytes{bucket=%q} %d\nxm_bucket_objects{bucket=%q} %d\nxm_bucket_pending_bytes{bucket=%q} %d\nxm_bucket_public{bucket=%q} %d\n",
+				b.Name, b.Used, b.Name, b.Objects, b.Name, b.Pending, b.Name, boolToInt(b.Public))
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		w.Write([]byte(out))
@@ -302,18 +302,20 @@ func handleListBuckets(n *node.Node) http.HandlerFunc {
 func handleCreateBucket(n *node.Node) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Name  string `json:"name"`
-			Quota *int64 `json:"quota"`
+			Name   string `json:"name"`
+			Quota  *int64 `json:"quota"`
+			Public *bool  `json:"public"`
 		}
 		if err := readJSON(r, &req); err != nil {
 			fail(w, err)
 			return
 		}
-		if err := n.Store().CreateBucket(r.Context(), req.Name, req.Quota); err != nil {
+		public := req.Public != nil && *req.Public
+		if err := n.Store().CreateBucket(r.Context(), req.Name, req.Quota, public); err != nil {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"name": req.Name, "quota": req.Quota})
+		writeJSON(w, 200, map[string]any{"name": req.Name, "quota": req.Quota, "public": public})
 	}
 }
 
@@ -327,20 +329,54 @@ func handleDeleteBucket(n *node.Node) http.HandlerFunc {
 	}
 }
 
+// handlePatchBucket 桶配置更新（配额/公共读）。字段**存在性**区分语义：
+// 缺席 = 不动；quota 显式 null = 解除限制；public 为布尔。两者皆缺席 → 400。
 func handlePatchBucket(n *node.Node) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Quota *int64 `json:"quota"`
-		}
-		if err := readJSON(r, &req); err != nil {
+		name := r.PathValue("name")
+		var raw map[string]json.RawMessage
+		if err := readJSON(r, &raw); err != nil {
 			fail(w, err)
 			return
 		}
-		if err := n.Store().SetQuota(r.Context(), r.PathValue("name"), req.Quota); err != nil {
+		if _, ok := raw["quota"]; !ok {
+			if _, ok := raw["public"]; !ok {
+				fail(w, fmt.Errorf("%w: nothing to update (quota or public required)", errs.ErrInvalidArgument))
+				return
+			}
+		}
+		if rq, ok := raw["quota"]; ok {
+			var quota *int64
+			if string(rq) != "null" {
+				var v int64
+				if err := json.Unmarshal(rq, &v); err != nil || v <= 0 {
+					fail(w, fmt.Errorf("%w: quota must be a positive integer or null", errs.ErrInvalidArgument))
+					return
+				}
+				quota = &v
+			}
+			if err := n.Store().SetQuota(r.Context(), name, quota); err != nil {
+				fail(w, err)
+				return
+			}
+		}
+		if rp, ok := raw["public"]; ok {
+			var public bool
+			if err := json.Unmarshal(rp, &public); err != nil {
+				fail(w, fmt.Errorf("%w: public must be a boolean", errs.ErrInvalidArgument))
+				return
+			}
+			if err := n.Store().SetBucketPublic(r.Context(), name, public); err != nil {
+				fail(w, err)
+				return
+			}
+		}
+		st, err := n.Store().BucketStat(r.Context(), name)
+		if err != nil {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"quota": req.Quota})
+		writeJSON(w, 200, st)
 	}
 }
 

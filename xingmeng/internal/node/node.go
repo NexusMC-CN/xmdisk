@@ -14,6 +14,7 @@ import (
 
 	"xingmeng/internal/config"
 	"xingmeng/internal/errs"
+	"xingmeng/internal/pubread"
 	"xingmeng/internal/repl"
 	"xingmeng/internal/s3"
 	xsftp "xingmeng/internal/sftp"
@@ -205,6 +206,12 @@ func (n *Node) DataHandler() http.Handler {
 	mux.Handle("/dav/", xwebdav.Router(n.store))
 	mux.Handle("/", n.S3Handler())
 	return n.serveGate(mux)
+}
+
+// PublicHandler 公共读面（99-D024）：独立只读端口，无鉴权只认桶公共标志；
+// 与数据面同闸门（serve=off 503、ro 照常读）。
+func (n *Node) PublicHandler() http.Handler {
+	return n.serveGate(pubread.New(n.store))
 }
 
 func (n *Node) serveGate(next http.Handler) http.Handler {

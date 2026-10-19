@@ -130,6 +130,7 @@ type BucketStat struct {
 	Used    int64
 	Pending int64
 	Objects int64
+	Public  bool // 公共读开关（99-D024）
 }
 
 type PutOptions struct {
@@ -157,8 +158,9 @@ type ListResult struct {
 
 var bucketNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 
-// CreateBucket 创建桶；quota 为 nil 表示不限。
-func (s *Store) CreateBucket(ctx context.Context, name string, quota *int64) error {
+// CreateBucket 创建桶；quota 为 nil 表示不限；public 开公共读（99-D024，
+// 仅公共读端口生效，S3/WebDAV/SFTP 永远要凭据）。
+func (s *Store) CreateBucket(ctx context.Context, name string, quota *int64, public bool) error {
 	if !bucketNameRe.MatchString(name) {
 		return fmt.Errorf("%w: invalid bucket name %q", errs.ErrInvalidArgument, name)
 	}
@@ -166,7 +168,16 @@ func (s *Store) CreateBucket(ctx context.Context, name string, quota *int64) err
 		if err := t.CreateBucket(name, quota, time.Now().UnixNano()); err != nil {
 			return err
 		}
-		return appendOp(t, s.currentEpoch(), meta.OpBucketCreate, bucketPayload{Name: name, Quota: quota})
+		if public {
+			if err := t.SetBucketPublic(name, true); err != nil {
+				return err
+			}
+		}
+		p := bucketPayload{Name: name, Quota: quota}
+		if public {
+			p.Public = &public
+		}
+		return appendOp(t, s.currentEpoch(), meta.OpBucketCreate, p)
 	})
 }
 
@@ -199,12 +210,25 @@ func (s *Store) SetQuota(ctx context.Context, name string, quota *int64) error {
 	})
 }
 
+// SetBucketPublic 切换桶公共读标志（99-D024；复制面收敛，从节点回放生效）。
+func (s *Store) SetBucketPublic(ctx context.Context, name string, public bool) error {
+	return s.mutate(ctx, func(t *meta.Tx) error {
+		if _, err := t.GetBucket(name); err != nil {
+			return err
+		}
+		if err := t.SetBucketPublic(name, public); err != nil {
+			return err
+		}
+		return appendOp(t, s.currentEpoch(), meta.OpBucketPublic, bucketPayload{Name: name, Public: &public})
+	})
+}
+
 func (s *Store) BucketStat(ctx context.Context, name string) (*BucketStat, error) {
 	b, err := s.meta.GetBucket(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return &BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects}, nil
+	return &BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects, Public: b.Public}, nil
 }
 
 // ListBucketStats 返回全部桶用量（admin status 与 metrics 用）。
@@ -219,7 +243,7 @@ func (s *Store) ListBucketStats(ctx context.Context) ([]BucketStat, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects})
+		out = append(out, BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects, Public: b.Public})
 	}
 	return out, nil
 }

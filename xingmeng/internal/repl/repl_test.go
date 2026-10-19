@@ -68,11 +68,11 @@ func TestReplicationBasic(t *testing.T) {
 	slvStore := newStore(t, "s")
 
 	// 主节点造数据：两桶、小文件、分块大文件、覆盖写、目录、move、tree_move、删除
-	if err := mst.CreateBucket(ctx, "alpha", nil); err != nil {
+	if err := mst.CreateBucket(ctx, "alpha", nil, false); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 	quota := int64(1 << 30)
-	mst.CreateBucket(ctx, "beta", &quota)
+	mst.CreateBucket(ctx, "beta", &quota, false)
 	mustPutS(t, mst, "alpha", "small.txt", 512<<10, store.PutOptions{ContentType: "text/plain"})
 	mustPutS(t, mst, "alpha", "big.bin", 5<<20, store.PutOptions{})     // 两块 blob
 	mustPutS(t, mst, "alpha", "small.txt", 300<<10, store.PutOptions{}) // 覆盖
@@ -93,6 +93,10 @@ func TestReplicationBasic(t *testing.T) {
 	if err := mst.CreateCred(ctx, "REPLAK01", "repl-secret-0123456789", "alpha"); err != nil {
 		t.Fatalf("create cred: %v", err)
 	}
+	// 公共读标志同样复制（99-D024：建桶即公共 + 运行时切换）
+	if err := mst.CreateBucket(ctx, "gamma", nil, true); err != nil {
+		t.Fatalf("create public bucket: %v", err)
+	}
 
 	master := NewMaster(mst, "tok")
 	srv := httptest.NewServer(master.Handler())
@@ -105,6 +109,24 @@ func TestReplicationBasic(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	drain(t, ctx, sl)
+
+	// 运行时切换公共标志后再收敛一次（99-D024）
+	if err := mst.SetBucketPublic(ctx, "beta", true); err != nil {
+		t.Fatalf("set public: %v", err)
+	}
+	drain(t, ctx, sl)
+	for _, c := range []struct {
+		b    string
+		want bool
+	}{{"beta", true}, {"gamma", true}, {"alpha", false}} {
+		st, err := slvStore.BucketStat(ctx, c.b)
+		if err != nil {
+			t.Fatalf("slave stat %s: %v", c.b, err)
+		}
+		if st.Public != c.want {
+			t.Fatalf("slave %s public=%v want %v", c.b, st.Public, c.want)
+		}
+	}
 
 	// 条目一致，且每个 blob 引用在从节点数据面就位
 	for _, c := range []struct{ bucket, key string }{
@@ -183,7 +205,7 @@ func TestTombstoneSkip(t *testing.T) {
 	mst := newStore(t, "m")
 	slvStore := newStore(t, "s")
 
-	mst.CreateBucket(ctx, "bkt", nil)
+	mst.CreateBucket(ctx, "bkt", nil, false)
 	oi := mustPutS(t, mst, "bkt", "k", 64<<10, store.PutOptions{})
 	if err := mst.Delete(ctx, "bkt", "k"); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -218,7 +240,7 @@ func TestResnapshotBootstrap(t *testing.T) {
 	mst := newStore(t, "m")
 	slvStore := newStore(t, "s")
 
-	mst.CreateBucket(ctx, "bkt", nil)
+	mst.CreateBucket(ctx, "bkt", nil, false)
 	mustPutS(t, mst, "bkt", "a", 100<<10, store.PutOptions{})
 	mustPutS(t, mst, "bkt", "b", 100<<10, store.PutOptions{})
 	mustPutS(t, mst, "bkt", "c", 100<<10, store.PutOptions{})

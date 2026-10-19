@@ -40,7 +40,7 @@ func newTestHandler(t *testing.T) (*Handler, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	if err := s.CreateBucket(context.Background(), testBucket, nil); err != nil {
+	if err := s.CreateBucket(context.Background(), testBucket, nil, false); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 	if err := s.CreateCred(context.Background(), testAK, testSK, testBucket); err != nil {

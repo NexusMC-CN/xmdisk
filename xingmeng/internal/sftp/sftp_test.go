@@ -38,7 +38,7 @@ func startTestServer(t *testing.T) (*Server, net.Addr, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	if err := st.CreateBucket(context.Background(), testBucket, nil); err != nil {
+	if err := st.CreateBucket(context.Background(), testBucket, nil, false); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 	if err := st.CreateCred(context.Background(), testAK, testSK, testBucket); err != nil {
@@ -239,7 +239,7 @@ func TestSFTPAuthAndErrors(t *testing.T) {
 	// 写到配额满的桶：OS 层权限错误（映射自 QuotaExceeded）
 	ctx := context.Background()
 	quota := int64(1 << 20)
-	st.CreateBucket(ctx, "tiny", &quota)
+	st.CreateBucket(ctx, "tiny", &quota, false)
 	st.CreateCred(ctx, "TINYAK1", "tiny-secret-0123", "tiny")
 	tiny := dialSFTP(t, addr, "TINYAK1", "tiny-secret-0123")
 	f, err := tiny.Create("/big.bin")

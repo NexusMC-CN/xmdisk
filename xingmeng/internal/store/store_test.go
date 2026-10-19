@@ -74,7 +74,7 @@ func md5hex(b []byte) string {
 func TestPutGetRoundtrip(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if err := s.CreateBucket(ctx, "bkt", nil); err != nil {
+	if err := s.CreateBucket(ctx, "bkt", nil, false); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 	data := randBytes(t, 1<<20-100) // 单 blob 路径
@@ -119,7 +119,7 @@ func TestPutGetRoundtrip(t *testing.T) {
 func TestPutChunkedAndRange(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 
 	data := randBytes(t, 5<<20) // 阈值 1MB / 分块 4MB → 两块
 	oi := mustPut(t, s, "bkt", "big.bin", data, PutOptions{})
@@ -157,7 +157,7 @@ func TestPutChunkedAndRange(t *testing.T) {
 func TestOverwriteAndDelete(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 
 	mustPut(t, s, "bkt", "k", randBytes(t, 100<<10), PutOptions{})
 	mustPut(t, s, "bkt", "k", randBytes(t, 300<<10), PutOptions{})
@@ -200,7 +200,7 @@ func TestQuota(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	quota := int64(1 << 20)
-	if err := s.CreateBucket(ctx, "qta", &quota); err != nil {
+	if err := s.CreateBucket(ctx, "qta", &quota, false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	mustPut(t, s, "qta", "a", randBytes(t, 600_000), PutOptions{})
@@ -223,7 +223,7 @@ func TestQuota(t *testing.T) {
 func TestDedup(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	data := randBytes(t, 128<<10)
 	mustPut(t, s, "bkt", "k1", data, PutOptions{})
 	mustPut(t, s, "bkt", "k2", data, PutOptions{})
@@ -240,7 +240,7 @@ func TestDedup(t *testing.T) {
 func TestDirAndList(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 
 	if err := s.Mkdir(ctx, "bkt", "d"); err != nil {
 		t.Fatalf("mkdir d: %v", err)
@@ -322,7 +322,7 @@ func keysOf(items []ObjInfo) []string {
 func TestReadOnly(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	s.SetReadOnly(true)
 	defer s.SetReadOnly(false)
 	if _, err := s.Put(ctx, "bkt", "k", bytes.NewReader([]byte("x")), PutOptions{}); !errors.Is(err, errs.ErrReadOnly) {
@@ -340,13 +340,13 @@ func TestReadOnly(t *testing.T) {
 func TestBucketOps(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if err := s.CreateBucket(ctx, "Bad_Name", nil); !errors.Is(err, errs.ErrInvalidArgument) {
+	if err := s.CreateBucket(ctx, "Bad_Name", nil, false); !errors.Is(err, errs.ErrInvalidArgument) {
 		t.Fatalf("want InvalidArgument, got %v", err)
 	}
-	if err := s.CreateBucket(ctx, "okb", nil); err != nil {
+	if err := s.CreateBucket(ctx, "okb", nil, false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.CreateBucket(ctx, "okb", nil); !errors.Is(err, errs.ErrBucketExists) {
+	if err := s.CreateBucket(ctx, "okb", nil, false); !errors.Is(err, errs.ErrBucketExists) {
 		t.Fatalf("want BucketExists, got %v", err)
 	}
 	if err := s.DeleteBucket(ctx, "okb"); err != nil {
@@ -356,17 +356,51 @@ func TestBucketOps(t *testing.T) {
 		t.Fatalf("want BucketNotFound, got %v", err)
 	}
 	// 非空桶拒绝删除
-	s.CreateBucket(ctx, "full", nil)
+	s.CreateBucket(ctx, "full", nil, false)
 	mustPut(t, s, "full", "k", []byte("data"), PutOptions{})
 	if err := s.DeleteBucket(ctx, "full"); !errors.Is(err, errs.ErrDirNotEmpty) {
 		t.Fatalf("want DirNotEmpty, got %v", err)
+	}
+
+	// 公共读标志（99-D024）：建桶即公共、运行时切换、跨重启持久（schema v3）
+	if err := s.CreateBucket(ctx, "pubb", nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetBucketPublic(ctx, "full", true); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s2, err := Open(s.cfg)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	for _, c := range []struct {
+		b    string
+		want bool
+	}{{"pubb", true}, {"full", true}, {"okb", false}} {
+		if _, err := s2.BucketStat(ctx, c.b); err == nil && c.b == "okb" {
+			t.Fatalf("okb was deleted")
+		} else if err != nil && c.b != "okb" {
+			t.Fatalf("stat %s: %v", c.b, err)
+		}
+		if c.b == "okb" {
+			continue
+		}
+		st, err := s2.BucketStat(ctx, c.b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Public != c.want {
+			t.Fatalf("%s public=%v want %v", c.b, st.Public, c.want)
+		}
 	}
 }
 
 func TestEmptyAndMissing(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 
 	// 空对象
 	oi := mustPut(t, s, "bkt", "empty", nil, PutOptions{})
@@ -398,7 +432,7 @@ func TestEmptyAndMissing(t *testing.T) {
 func TestOplogPayloadShape(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "bkt", nil)
+	s.CreateBucket(ctx, "bkt", nil, false)
 	mustPut(t, s, "bkt", "k", []byte("hello"), PutOptions{})
 	ops, _ := s.meta.OpsAfter(ctx, 0, 10)
 	var put meta.Op

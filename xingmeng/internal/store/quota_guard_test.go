@@ -27,7 +27,7 @@ func TestStreamingQuotaGuardPut(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	quota := int64(1 << 20)
-	s.CreateBucket(ctx, "qta", &quota)
+	s.CreateBucket(ctx, "qta", &quota, false)
 
 	big := bytes.NewReader(randBytes(t, 32<<20))
 	cr := &countingReader{r: big}
@@ -67,7 +67,7 @@ func TestStreamingQuotaGuardMultipart(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	quota := int64(1 << 20)
-	s.CreateBucket(ctx, "qta", &quota)
+	s.CreateBucket(ctx, "qta", &quota, false)
 
 	id, _ := s.MpBegin(ctx, "qta", "mp.bin", PutOptions{})
 	cr := &countingReader{r: bytes.NewReader(randBytes(t, 32<<20))}
@@ -91,6 +91,6 @@ func TestStreamingQuotaGuardMultipart(t *testing.T) {
 func TestStreamingQuotaUnlimitedUnaffected(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.CreateBucket(ctx, "free", nil)                                // 不限桶：守卫关闭
+	s.CreateBucket(ctx, "free", nil, false)                         // 不限桶：守卫关闭
 	mustPut(t, s, "free", "big", randBytes(t, 5<<20), PutOptions{}) // 两块分块路径
 }

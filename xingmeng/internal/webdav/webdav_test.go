@@ -37,7 +37,7 @@ func newTestRouter(t *testing.T) (http.Handler, *store.Store) {
 	}
 	t.Cleanup(func() { st.Close() })
 	ctx := context.Background()
-	st.CreateBucket(ctx, testBucket, nil)
+	st.CreateBucket(ctx, testBucket, nil, false)
 	st.CreateCred(ctx, testAK, testSK, testBucket)
 	return Router(st), st
 }
@@ -174,7 +174,7 @@ func TestWebDAVAuthAndQuota(t *testing.T) {
 
 	// 配额：带 Content-Length 的 PUT 超额 → 507（路由层预检，不读 body）
 	quota := int64(1 << 20)
-	st.CreateBucket(ctx, "tiny", &quota)
+	st.CreateBucket(ctx, "tiny", &quota, false)
 	st.CreateCred(ctx, "TINYAK1", "tiny-secret-0123", "tiny")
 	req = httptest.NewRequest("PUT", "/dav/tiny/big.bin", bytes.NewReader(make([]byte, 32<<20)))
 	req.SetBasicAuth("TINYAK1", "tiny-secret-0123")
