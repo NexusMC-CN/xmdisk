@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"xingmeng/internal/errs"
@@ -34,7 +35,8 @@ type SlaveConfig struct {
 type Slave struct {
 	cfg        SlaveConfig
 	store      *store.Store
-	hc         *http.Client
+	hcCtrl     *http.Client    // 控制请求（oplog/register/ack）：30s 超时
+	hcData     *http.Client    // 数据传输（blob/快照）：15min 超时，超时重试续传
 	tombstones map[string]bool // 主端已墓碑化的 blob（410 学得，每轮清空防复活失联）
 	lastSeq    int64
 	maxEpoch   uint32
@@ -61,7 +63,8 @@ func NewSlave(cfg SlaveConfig, s *store.Store) (*Slave, error) {
 	}
 	return &Slave{
 		cfg: cfg, store: s,
-		hc:         &http.Client{},
+		hcCtrl:     &http.Client{Timeout: 30 * time.Second},
+		hcData:     &http.Client{Timeout: 15 * time.Minute},
 		tombstones: map[string]bool{},
 		lastSeq:    last,
 		maxEpoch:   epoch,
@@ -189,6 +192,11 @@ func (sl *Slave) Run(ctx context.Context) {
 		switch {
 		case err == nil:
 			if n == 0 {
+				// 空转心跳：刷新主端 last_seen，防活跃窗口（99-D026）误判已追平的
+				// 从节点为离线、进而被截断日志逼着无谓重建。
+				if aerr := sl.ack(ctx); aerr != nil {
+					slog.Debug("slave idle ack", "err", aerr)
+				}
 				if !sleepCtx(ctx, sl.cfg.IdleWait) {
 					return
 				}
@@ -273,7 +281,10 @@ func (sl *Slave) get(ctx context.Context, path string) (*http.Response, error) {
 	if sl.cfg.Token != "" {
 		req.Header.Set("X-Xm-Token", sl.cfg.Token)
 	}
-	return sl.hc.Do(req)
+	if strings.HasPrefix(path, "/blob/") || path == "/snapshot" {
+		return sl.hcData.Do(req)
+	}
+	return sl.hcCtrl.Do(req)
 }
 
 func (sl *Slave) postJSON(ctx context.Context, path string, body, out any) error {
@@ -289,7 +300,7 @@ func (sl *Slave) postJSON(ctx context.Context, path string, body, out any) error
 	if sl.cfg.Token != "" {
 		req.Header.Set("X-Xm-Token", sl.cfg.Token)
 	}
-	resp, err := sl.hc.Do(req)
+	resp, err := sl.hcCtrl.Do(req)
 	if err != nil {
 		return err
 	}

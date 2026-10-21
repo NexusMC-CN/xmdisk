@@ -98,9 +98,13 @@ func (s *Server) handleSession(channel ssh.Channel, chReqs <-chan *ssh.Request, 
 }
 
 // loadOrCreateHostKey 加载或生成 ed25519 主机密钥（PKCS#8 PEM）。
+// 仅在文件不存在时生成（S-11）：其他读取错误（权限/损坏）直接失败，绝不
+// 静默换键——主机键无端变化会动摇客户端 TOFU 信任链并掩盖磁盘问题。
 func loadOrCreateHostKey(path string) (ssh.Signer, error) {
 	if raw, err := os.ReadFile(path); err == nil {
 		return ssh.ParsePrivateKey(raw)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read host key %s: %w", path, err)
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -111,7 +115,16 @@ func loadOrCreateHostKey(path string) (ssh.Signer, error) {
 		return nil, err
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+	// O_EXCL：并发启动或路径已被占位时不覆盖既有文件
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("persist host key: %w", err)
+	}
+	if _, err := f.Write(pemBytes); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("persist host key: %w", err)
+	}
+	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("persist host key: %w", err)
 	}
 	return ssh.NewSignerFromKey(priv)

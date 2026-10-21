@@ -34,12 +34,15 @@ func Router(st *store.Store) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		// 配额预检：声明长度超额度 → 507（不读 body，立即拒绝）
+		// 配额预检：声明长度超额度 → 507（不读 body，立即拒绝）。
+		// key 用桶后子路径（S-17：此前误把 "bucket/key" 整串当 key，覆盖写抵扣失效）。
 		if r.Method == http.MethodPut && r.ContentLength > 0 {
-			if allowance, limited, err := st.QuotaAllowance(r.Context(), bucket, trimSlash(rest)); err == nil &&
-				limited && r.ContentLength > allowance {
-				http.Error(w, "quota exceeded", http.StatusInsufficientStorage)
-				return
+			if _, tail, found := cutPath(rest); found {
+				if allowance, limited, err := st.QuotaAllowance(r.Context(), bucket, trimSlash(tail)); err == nil &&
+					limited && r.ContentLength > allowance {
+					http.Error(w, "quota exceeded", http.StatusInsufficientStorage)
+					return
+				}
 			}
 		}
 		mu.Lock()

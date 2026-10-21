@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -49,7 +50,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if rec := recover(); rec != nil {
-			writeXMLError(w, 500, "InternalError", fmt.Sprint(rec), r.URL.Path, reqID)
+			slog.Error("s3 handler panic", "panic", rec, "path", r.URL.Path, "request_id", reqID)
+			writeXMLError(w, 500, "InternalError", "internal error", r.URL.Path, reqID)
 		}
 	}()
 	if key == "" {
@@ -79,20 +81,12 @@ func requestID() string {
 func (h *Handler) bucketOp(w http.ResponseWriter, r *http.Request, bucket, reqID string) {
 	q := r.URL.Query()
 	switch r.Method {
-	case http.MethodPut:
-		if err := h.store.CreateBucket(r.Context(), bucket, nil, false); err != nil {
-			m := mapError(err)
-			writeXMLError(w, m.Status, m.Code, err.Error(), bucket, reqID)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	case http.MethodDelete:
-		if err := h.store.DeleteBucket(r.Context(), bucket); err != nil {
-			m := mapError(err)
-			writeXMLError(w, m.Status, m.Code, err.Error(), bucket, reqID)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+	case http.MethodPut, http.MethodDelete:
+		// 桶生命周期收归 admin 面（99-D025）：凭据只管对象读写；
+		// aws mb/rb、rclone mkdir/rmdir 到桶根会走到这里并得到 405，属预期。
+		writeXMLError(w, http.StatusMethodNotAllowed, "MethodNotAllowed",
+			"bucket lifecycle is admin-only; create/delete buckets via the admin API (docs/04)",
+			bucket, reqID)
 	case http.MethodHead:
 		if _, err := h.store.BucketStat(r.Context(), bucket); err != nil {
 			w.WriteHeader(http.StatusNotFound)

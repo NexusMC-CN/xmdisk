@@ -19,12 +19,13 @@ import (
 	"xingmeng/internal/store"
 )
 
-const (
-	testAK     = "TESTAK01"
-	testSK     = "test-secret-0123456789"
-	testKEK    = "unit-test-kek"
+var (
+	testAK     string // 建桶返回的服务端生成凭据填充（99-D025：AK/SK 不再由使用方指定）
+	testSK     string
 	testBucket = "tbkt"
 )
+
+const testKEK = "unit-test-kek"
 
 func newTestHandler(t *testing.T) (*Handler, *store.Store) {
 	t.Helper()
@@ -40,12 +41,11 @@ func newTestHandler(t *testing.T) (*Handler, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	if err := s.CreateBucket(context.Background(), testBucket, nil, false); err != nil {
+	cred, err := s.CreateBucket(context.Background(), testBucket, nil, false)
+	if err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
-	if err := s.CreateCred(context.Background(), testAK, testSK, testBucket); err != nil {
-		t.Fatalf("create cred: %v", err)
-	}
+	testAK, testSK = cred.AccessKey, cred.Secret
 	return New(s), s
 }
 
@@ -421,10 +421,10 @@ func TestS3BucketOps(t *testing.T) {
 	if rec := doSigned(t, h, http.MethodHead, "/nope-bkt", nil, nil); rec.Code != 403 {
 		t.Fatalf("head foreign bucket: %d", rec.Code)
 	}
-	// 非空桶删除被拒
+	// 桶删除收归 admin 面（99-D025）：数据面一律 405（非空与否不再区分）
 	doSigned(t, h, http.MethodPut, "/"+testBucket+"/keep", []byte("x"), nil)
-	if rec := doSigned(t, h, http.MethodDelete, "/"+testBucket, nil, nil); rec.Code != 409 {
-		t.Fatalf("delete non-empty: %d", rec.Code)
+	if rec := doSigned(t, h, http.MethodDelete, "/"+testBucket, nil, nil); rec.Code != 405 {
+		t.Fatalf("delete via data plane must 405, got %d", rec.Code)
 	}
 	// GetBucketLocation
 	rec := doSigned(t, h, http.MethodGet, "/"+testBucket+"?location", nil, nil)
@@ -501,5 +501,31 @@ func TestS3DirMarkerDelete(t *testing.T) {
 	}
 	if _, err := s.Stat(ctx, testBucket, "d3/"); !errors.Is(err, errs.ErrKeyNotFound) {
 		t.Fatalf("d3/ must be gone: %v", err)
+	}
+}
+
+// TestBucketLifecycleAdminOnly 桶生命周期收归 admin 面（99-D025，S-01）：
+// 数据面对桶增删一律 405——已删桶不能被旧凭据"复活"；HEAD/列举不受影响。
+func TestBucketLifecycleAdminOnly(t *testing.T) {
+	h, s := newTestHandler(t)
+	if rec := doSigned(t, h, http.MethodPut, "/"+testBucket, nil, nil); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("bucket create via data plane must 405, got %d", rec.Code)
+	}
+	if rec := doSigned(t, h, http.MethodDelete, "/"+testBucket, nil, nil); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("bucket delete via data plane must 405, got %d", rec.Code)
+	}
+	if rec := doSigned(t, h, http.MethodHead, "/"+testBucket, nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("head bucket must still work, got %d", rec.Code)
+	}
+	// admin 删桶（级联删钥）后：旧凭据本身已失效（403——桶无法被数据面复活，
+	// 这是 S-01 的收口验证：桶亡=钥亡，连"用旧凭据重建桶"的路径都不存在）
+	if err := s.DeleteBucket(context.Background(), testBucket); err != nil {
+		t.Fatalf("admin delete bucket: %v", err)
+	}
+	if rec := doSigned(t, h, http.MethodPut, "/"+testBucket, nil, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("stale credential must be revoked (403), got %d", rec.Code)
+	}
+	if rec := doSigned(t, h, http.MethodGet, "/"+testBucket, nil, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("list deleted bucket with stale cred must 403, got %d", rec.Code)
 	}
 }

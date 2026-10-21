@@ -315,17 +315,16 @@ func (c *awsChunkedReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 		if c.expectCRLF {
-			if _, err := c.r.ReadString('\n'); err != nil { // 块终止 \r\n
+			if _, err := c.readFrameLine(); err != nil { // 块终止 \r\n
 				return 0, err
 			}
 			c.expectCRLF = false
 			continue
 		}
-		line, err := c.r.ReadString('\n')
+		line, err := c.readFrameLine()
 		if err != nil {
 			return 0, err
 		}
-		line = strings.TrimRight(line, "\r\n")
 		sizeField, _, _ := strings.Cut(line, ";")
 		n, perr := strconv.ParseInt(sizeField, 16, 64)
 		if perr != nil {
@@ -333,10 +332,10 @@ func (c *awsChunkedReader) Read(p []byte) (int, error) {
 		}
 		if n == 0 {
 			c.sawFinal = true
-			// 吸掉 trailer 与结尾空行
+			// 吸掉 trailer 与结尾空行（行长同样受限）
 			for {
-				t, terr := c.r.ReadString('\n')
-				if terr != nil || t == "\r\n" || t == "\n" {
+				t, terr := c.readFrameLine()
+				if terr != nil || t == "" {
 					break
 				}
 			}
@@ -354,4 +353,17 @@ func (c *awsChunkedReader) Read(p []byte) (int, error) {
 		c.expectCRLF = true
 	}
 	return read, err
+}
+
+// readFrameLine 读一行并剥掉尾部换行；用 ReadSlice 把行长钉死在 bufio 缓冲
+// 大小内（4KB）——恶意超长帧头不再无界累积内存（S-09）。
+func (c *awsChunkedReader) readFrameLine() (string, error) {
+	line, err := c.r.ReadSlice('\n')
+	if err == bufio.ErrBufferFull {
+		return "", fmt.Errorf("%w: aws-chunked frame line too long", errs.ErrInvalidArgument)
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(line), "\r\n"), nil
 }

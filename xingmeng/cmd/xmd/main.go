@@ -58,12 +58,22 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
 	// 必填拒启（99-D023②）：容器内监听 0.0.0.0，空凭证不可接受。
+	// 强度硬下限（S-04，99-D027）：admin/KEK ≥16、repl ≥8，env/YAML/运行时三路一致。
 	kek := os.Getenv("XM_KEK")
 	if kek == "" {
 		fatal("XM_KEK is required (KEK of credential secrets; keep it identical across the cluster)")
 	}
+	if len(kek) < 16 {
+		fatal("XM_KEK must be at least 16 characters (use a long high-entropy random string)")
+	}
 	if cfg.AdminToken == "" {
 		fatal("admin token is required: set XM_ADMIN_TOKEN (or admin_token in config)")
+	}
+	if len(cfg.AdminToken) < 16 {
+		fatal("admin token must be at least 16 characters (use a long high-entropy random string)")
+	}
+	if cfg.Replication.Token != "" && len(cfg.Replication.Token) < 8 {
+		fatal("repl token must be at least 8 characters when set (empty = repl face disabled)")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

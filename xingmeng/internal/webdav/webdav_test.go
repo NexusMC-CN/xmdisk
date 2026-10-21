@@ -16,9 +16,9 @@ import (
 	"xingmeng/internal/store"
 )
 
-const (
-	testAK     = "DAVUSER01"
-	testSK     = "dav-secret-0123456789"
+var (
+	testAK     string // 建桶返回的服务端生成凭据（99-D025）
+	testSK     string
 	testBucket = "dav-bkt"
 )
 
@@ -37,8 +37,11 @@ func newTestRouter(t *testing.T) (http.Handler, *store.Store) {
 	}
 	t.Cleanup(func() { st.Close() })
 	ctx := context.Background()
-	st.CreateBucket(ctx, testBucket, nil, false)
-	st.CreateCred(ctx, testAK, testSK, testBucket)
+	cred, err := st.CreateBucket(ctx, testBucket, nil, false)
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	testAK, testSK = cred.AccessKey, cred.Secret
 	return Router(st), st
 }
 
@@ -174,10 +177,12 @@ func TestWebDAVAuthAndQuota(t *testing.T) {
 
 	// 配额：带 Content-Length 的 PUT 超额 → 507（路由层预检，不读 body）
 	quota := int64(1 << 20)
-	st.CreateBucket(ctx, "tiny", &quota, false)
-	st.CreateCred(ctx, "TINYAK1", "tiny-secret-0123", "tiny")
+	tinyCred, err := st.CreateBucket(ctx, "tiny", &quota, false)
+	if err != nil {
+		t.Fatalf("create tiny bucket: %v", err)
+	}
 	req = httptest.NewRequest("PUT", "/dav/tiny/big.bin", bytes.NewReader(make([]byte, 32<<20)))
-	req.SetBasicAuth("TINYAK1", "tiny-secret-0123")
+	req.SetBasicAuth(tinyCred.AccessKey, tinyCred.Secret)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInsufficientStorage {
@@ -189,7 +194,7 @@ func TestWebDAVAuthAndQuota(t *testing.T) {
 	// 无长度流式写入 → Write 即刻限流（x/net/webdav 固定映射 405，docs/06 已记偏离）
 	req = httptest.NewRequest("PUT", "/dav/tiny/stream.bin", io.NopCloser(bytes.NewReader(make([]byte, 32<<20))))
 	req.ContentLength = -1 // 强制未知长度
-	req.SetBasicAuth("TINYAK1", "tiny-secret-0123")
+	req.SetBasicAuth(tinyCred.AccessKey, tinyCred.Secret)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code < 400 {
@@ -200,7 +205,7 @@ func TestWebDAVAuthAndQuota(t *testing.T) {
 	}
 	// 正常额度内写入不受影响（512KB < 1MB）
 	req = httptest.NewRequest("PUT", "/dav/tiny/ok.bin", bytes.NewReader(randData(t, 512<<10)))
-	req.SetBasicAuth("TINYAK1", "tiny-secret-0123")
+	req.SetBasicAuth(tinyCred.AccessKey, tinyCred.Secret)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 201 {
@@ -208,7 +213,7 @@ func TestWebDAVAuthAndQuota(t *testing.T) {
 	}
 	// 再写 600KB 超过总额度 → 507
 	req = httptest.NewRequest("PUT", "/dav/tiny/ok2.bin", bytes.NewReader(randData(t, 600<<10)))
-	req.SetBasicAuth("TINYAK1", "tiny-secret-0123")
+	req.SetBasicAuth(tinyCred.AccessKey, tinyCred.Secret)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInsufficientStorage {

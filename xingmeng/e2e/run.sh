@@ -6,8 +6,8 @@
 set -u
 export MSYS_NO_PATHCONV=1
 NET=xmnet; M=xmd-master; S=xmd-slave
-AK=E2EAK001; SK=e2e-secret-0123456789; BKT=e2ebkt
-PAK=E2EAK002; PSK=e2e-secret2-0123456789; PUBB=pubbkt; PUBTXT=pub-ok-0123456789
+BKT=e2ebkt; PUBB=pubbkt; PUBTXT=pub-ok-0123456789
+# AK/SK 不再预置：由建桶与轮换响应动态获取（99-D025：服务端生成强凭据）
 KEK=e2e-kek-0123456789abcdef
 ADM=e2e-adm-tok-0123456789
 RTOK=e2e-repl-tok-0123456789
@@ -33,9 +33,16 @@ docker exec $M curl -s -H "X-Xm-Token: $ADM" localhost:9002/status | grep -q '"r
 # 管理页可达（登录页免凭证可见）
 docker exec $M curl -sf localhost:9002/ | grep -q 星梦存储 || fail "webui served"
 
-say "2. 建桶建凭据（admin API，会话 token 亦可——这里直用 admin token）"
-docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/buckets -d "{\"name\":\"$BKT\"}" | grep -q "$BKT" || fail "create bucket"
-docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/creds -d "{\"access_key\":\"$AK\",\"secret\":\"$SK\",\"bucket\":\"$BKT\"}" | grep -q "$AK" || fail "create cred"
+say "2. 建桶即发钥（99-D025：桶=租户=一把钥匙，AK/SK 服务端生成，一次性返回）+ 双 token 会话"
+docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/buckets -d "{\"name\":\"$BKT\"}" | tee /tmp/bkt.json | grep -q "\"secret\"" || fail "create bucket must issue AK+SK"
+AK=$(grep -o '"access_key":"[^"]*"' /tmp/bkt.json | cut -d'"' -f4)
+SK=$(grep -o '"secret":"[^"]*"' /tmp/bkt.json | cut -d'"' -f4)
+[ -n "$AK" ] && [ -n "$SK" ] || fail "parse issued credential"
+# rotate 挂桶路径：保 AK 换 SK
+docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/buckets/$BKT/rotate | grep -q "\"secret\"" || fail "rotate bucket cred"
+SK=$(docker exec $M sh -c "curl -s -H 'X-Xm-Token: $ADM' -XPOST localhost:9002/buckets/$BKT/rotate" | grep -o '"secret":"[^"]*"' | cut -d'"' -f4)
+# 独立凭据接口已移除
+docker exec $M curl -s -o /dev/null -w "%{http_code}" -H "X-Xm-Token: $ADM" localhost:9002/creds | grep -q 404 || fail "GET /creds must be gone"
 # 双 token：admin token 换 1 小时会话，会话调用 /status 成功
 docker exec $M sh -c "curl -s -H 'X-Xm-Token: $ADM' -XPOST localhost:9002/auth/session -d '{\"ttl_hours\":1}' | grep -o '\"token\":\"[a-f0-9]*' | cut -d'\"' -f4 > /tmp/sess" || fail "issue session"
 docker exec $M sh -c "curl -sf -H \"X-Xm-Session: \$(cat /tmp/sess)\" localhost:9002/status >/dev/null" || fail "session works"
@@ -65,8 +72,12 @@ docker run --rm --network $NET --entrypoint sh minio/mc -c "
   ! mc stat xm/$BKT/mark-del/ >/dev/null 2>&1" || fail "dir marker delete"
 
 say "4c. 公共读面（99-D024）：匿名直链 / 私有桶与不存在同构 404 / Range / 无缓存头"
-docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/buckets -d "{\"name\":\"$PUBB\",\"public\":true}" | grep -q "$PUBB" || fail "create public bucket"
-docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/creds -d "{\"access_key\":\"$PAK\",\"secret\":\"$PSK\",\"bucket\":\"$PUBB\"}" | grep -q "$PAK" || fail "create pub cred"
+PUBRESP=$(docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/buckets -d "{\"name\":\"$PUBB\",\"public\":true}")
+echo "$PUBRESP" | grep -q "\"secret\"" || fail "create public bucket must issue cred"
+PAK=$(echo "$PUBRESP" | grep -o '"access_key":"[^"]*"' | cut -d'"' -f4)
+PSK=$(echo "$PUBRESP" | grep -o '"secret":"[^"]*"' | cut -d'"' -f4)
+docker exec $M sh -c "curl -s -H 'X-Xm-Token: $ADM' -XPOST localhost:9002/buckets/$PUBB/rotate" | grep -q "\"secret\"" || fail "rotate pub cred"
+PSK=$(docker exec $M sh -c "curl -s -H 'X-Xm-Token: $ADM' -XPOST localhost:9002/buckets/$PUBB/rotate" | grep -o '"secret":"[^"]*"' | cut -d'"' -f4)
 docker run --rm --network $NET --entrypoint sh minio/mc -c "
   mc alias set xm http://xmd-master:9000 $PAK $PSK >/dev/null &&
   echo $PUBTXT > /tmp/h.txt &&

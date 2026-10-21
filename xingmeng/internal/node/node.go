@@ -95,6 +95,8 @@ func Start(ctx context.Context, cfg *config.Config, kek []byte) (*Node, error) {
 		GCInterval:          cfg.Storage.GCInterval,
 		GCGrace:             cfg.Storage.GCGrace,
 		MultipartAbortAfter: cfg.Storage.MultipartAbortAfter,
+		OplogRetention:      cfg.Replication.OplogRetention,
+		SlaveActiveWindow:   cfg.Replication.SlaveActiveWindow,
 		KEK:                 kek,
 	})
 	if err != nil {
@@ -117,9 +119,6 @@ func Start(ctx context.Context, cfg *config.Config, kek []byte) (*Node, error) {
 				n.replSealed, n.replToken = state.ReplTokenSealed, tok
 			}
 		}
-	}
-	if n.replToken != "" && len(n.replToken) < 8 {
-		slog.Warn("repl token shorter than 8 chars is weak")
 	}
 
 	// 复制面：master 且 token 非空才构造端点并监听；空 token = 不监听（99-D023③）。

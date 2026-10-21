@@ -68,9 +68,11 @@ func TestReplicationBasic(t *testing.T) {
 	slvStore := newStore(t, "s")
 
 	// 主节点造数据：两桶、小文件、分块大文件、覆盖写、目录、move、tree_move、删除
-	if err := mst.CreateBucket(ctx, "alpha", nil, false); err != nil {
+	alphaCred, err := mst.CreateBucket(ctx, "alpha", nil, false)
+	if err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
+	alphaAK := alphaCred.AccessKey
 	quota := int64(1 << 30)
 	mst.CreateBucket(ctx, "beta", &quota, false)
 	mustPutS(t, mst, "alpha", "small.txt", 512<<10, store.PutOptions{ContentType: "text/plain"})
@@ -89,12 +91,12 @@ func TestReplicationBasic(t *testing.T) {
 	if err := mst.Delete(ctx, "alpha", "gone"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	// 凭据（密文）同样复制：从节点提升后必须能验签（99-D009）
-	if err := mst.CreateCred(ctx, "REPLAK01", "repl-secret-0123456789", "alpha"); err != nil {
-		t.Fatalf("create cred: %v", err)
+	// 凭据（密文）同样复制：从节点提升后必须能验签（99-D009；建桶即发钥，99-D025）
+	if _, err := mst.RotateBucketCred(ctx, "alpha"); err != nil {
+		t.Fatalf("rotate alpha cred: %v", err)
 	}
 	// 公共读标志同样复制（99-D024：建桶即公共 + 运行时切换）
-	if err := mst.CreateBucket(ctx, "gamma", nil, true); err != nil {
+	if _, err := mst.CreateBucket(ctx, "gamma", nil, true); err != nil {
 		t.Fatalf("create public bucket: %v", err)
 	}
 
@@ -184,15 +186,16 @@ func TestReplicationBasic(t *testing.T) {
 		t.Fatalf("incremental entry: %v", err)
 	}
 	// 凭据已复制且从节点可解密验签；删除同样复制
-	cred, err := slvStore.LookupCred(ctx, "REPLAK01")
-	if err != nil || cred.Secret != "repl-secret-0123456789" || cred.Bucket != "alpha" {
-		t.Fatalf("cred replication: %v %+v", err, cred)
+	cred, err := slvStore.LookupCred(ctx, alphaAK)
+	mcred, merr := mst.LookupCred(ctx, alphaAK)
+	if err != nil || merr != nil || cred.Secret != mcred.Secret || cred.Bucket != "alpha" {
+		t.Fatalf("cred replication: %v %v %+v", err, merr, cred)
 	}
-	if err := mst.DeleteCred(ctx, "REPLAK01"); err != nil {
+	if err := mst.DeleteCred(ctx, alphaAK); err != nil {
 		t.Fatalf("delete cred: %v", err)
 	}
 	drain(t, ctx, sl)
-	if _, err := slvStore.LookupCred(ctx, "REPLAK01"); err == nil {
+	if _, err := slvStore.LookupCred(ctx, alphaAK); err == nil {
 		t.Fatalf("cred delete must replicate")
 	}
 }

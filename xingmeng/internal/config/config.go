@@ -62,8 +62,10 @@ type Config struct {
 		MultipartAbortAfter time.Duration `yaml:"multipart_abort_after"`
 	}
 	Replication struct {
-		MasterAddr string `yaml:"master_addr"` // slave 用（初值；运行态 SyncAddr 优先，99-D023）
-		Token      string `yaml:"token"`       // repl 面共享凭证（初值；为空 = 不监听复制面）
+		MasterAddr        string        `yaml:"master_addr"`         // slave 用（初值；运行态 SyncAddr 优先，99-D023）
+		Token             string        `yaml:"token"`               // repl 面共享凭证（初值；为空 = 不监听复制面；≥8，99-D027）
+		OplogRetention    time.Duration `yaml:"oplog_retention"`     // oplog 截断保留期（默认 24h，99-D026）
+		SlaveActiveWindow time.Duration `yaml:"slave_active_window"` // 从节点活跃窗口（默认 7d；窗口外注册不阻塞清扫/截断）
 	}
 	AdminToken     string `yaml:"admin_token"`     // admin 面凭证（必填，XM_ADMIN_TOKEN 优先）
 	PublicEndpoint string `yaml:"public_endpoint"` // 对外展示地址（WebUI 连接信息用；空 = 按请求推断）
@@ -145,6 +147,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Storage.MultipartAbortAfter == 0 {
 		c.Storage.MultipartAbortAfter = 168 * time.Hour
+	}
+	if c.Replication.OplogRetention == 0 {
+		c.Replication.OplogRetention = 24 * time.Hour
+	}
+	if c.Replication.SlaveActiveWindow == 0 {
+		c.Replication.SlaveActiveWindow = 7 * 24 * time.Hour
 	}
 	if c.Log.Level == "" {
 		c.Log.Level = "info"

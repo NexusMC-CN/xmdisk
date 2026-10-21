@@ -7,6 +7,8 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -42,6 +44,8 @@ type Config struct {
 	GCInterval          time.Duration // 标记-清扫周期（默认 1h）
 	GCGrace             time.Duration // trash 宽限期（默认 48h，docs/05 gc_grace）
 	MultipartAbortAfter time.Duration // multipart 会话超时清理（默认 168h）
+	OplogRetention      time.Duration // oplog 截断保留期（默认 24h；仅活跃从节点全部 ack 过的部分可删，99-D026）
+	SlaveActiveWindow   time.Duration // 从节点活跃判定窗口（默认 7d；窗口外注册不阻塞清扫/截断，99-D026）
 	KEK                 []byte        // 凭据主密钥（配置层从环境变量注入；空 = 凭据面不可用，99-D009）
 }
 
@@ -81,12 +85,23 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.MultipartMaxSize <= 0 {
 		cfg.MultipartMaxSize = 1 << 40 // 1TB（docs/01 设计上限）
 	}
+	if cfg.OplogRetention <= 0 {
+		cfg.OplogRetention = 24 * time.Hour
+	}
+	if cfg.SlaveActiveWindow <= 0 {
+		cfg.SlaveActiveWindow = 7 * 24 * time.Hour
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, err
 	}
 	m, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
 	if err != nil {
 		return nil, fmt.Errorf("open meta: %w", err)
+	}
+	// 密封凭据密文与全部元数据都在 meta.db 里：收紧到 0600（含 -wal/-shm，尽力而为——
+	// 数据目录属主即服务账户，docs/05 安全基线）。
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Chmod(filepath.Join(cfg.DataDir, "meta.db"+suffix), 0o600)
 	}
 	b, err := blob.Open(cfg.DataDir)
 	if err != nil {
@@ -124,13 +139,17 @@ type ObjInfo struct {
 }
 
 // BucketStat 是桶用量视图（计费/配额口径 = 逻辑字节，99-D008）。
+// AccessKey/SecretOK 来自绑定凭据（一桶一密，99-D025）：无钥桶（旧二进制
+// 所建）AccessKey 为空；SecretOK=false = 当前 KEK 解不开（需 rotate 恢复）。
 type BucketStat struct {
-	Name    string
-	Quota   *int64
-	Used    int64
-	Pending int64
-	Objects int64
-	Public  bool // 公共读开关（99-D024）
+	Name      string
+	Quota     *int64
+	Used      int64
+	Pending   int64
+	Objects   int64
+	Public    bool   // 公共读开关（99-D024）
+	AccessKey string // 绑定凭据 AK（不含 secret）
+	SecretOK  bool   // 密文在当前 KEK 下可解
 }
 
 type PutOptions struct {
@@ -158,13 +177,18 @@ type ListResult struct {
 
 var bucketNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 
-// CreateBucket 创建桶；quota 为 nil 表示不限；public 开公共读（99-D024，
-// 仅公共读端口生效，S3/WebDAV/SFTP 永远要凭据）。
-func (s *Store) CreateBucket(ctx context.Context, name string, quota *int64, public bool) error {
+// CreateBucket 创建桶并同事务签发凭据（桶=租户=一把钥匙，99-D025）：
+// AK/SK 均服务端生成，Secret 仅此一次随返回值交出（服务端只存密文）。
+// 同事务落 bucket_create + cred_put 双 op，从节点按序回放即收敛。
+func (s *Store) CreateBucket(ctx context.Context, name string, quota *int64, public bool) (*Cred, error) {
 	if !bucketNameRe.MatchString(name) {
-		return fmt.Errorf("%w: invalid bucket name %q", errs.ErrInvalidArgument, name)
+		return nil, fmt.Errorf("%w: invalid bucket name %q", errs.ErrInvalidArgument, name)
 	}
-	return s.mutate(ctx, func(t *meta.Tx) error {
+	if len(s.cfg.KEK) == 0 {
+		return nil, fmt.Errorf("%w: KEK not configured", errs.ErrInvalidArgument)
+	}
+	var cred *Cred
+	err := s.mutate(ctx, func(t *meta.Tx) error {
 		if err := t.CreateBucket(name, quota, time.Now().UnixNano()); err != nil {
 			return err
 		}
@@ -173,14 +197,38 @@ func (s *Store) CreateBucket(ctx context.Context, name string, quota *int64, pub
 				return err
 			}
 		}
+		ak, sk := genAccessKey(), genSecret()
+		enc, serr := s.seal(sk)
+		if serr != nil {
+			return serr
+		}
+		if err := t.InsertCred(ak, enc, name, time.Now().UnixNano()); err != nil {
+			return err
+		}
 		p := bucketPayload{Name: name, Quota: quota}
 		if public {
 			p.Public = &public
 		}
-		return appendOp(t, s.currentEpoch(), meta.OpBucketCreate, p)
+		if err := appendOp(t, s.currentEpoch(), meta.OpBucketCreate, p); err != nil {
+			return err
+		}
+		if err := appendOp(t, s.currentEpoch(), meta.OpCredPut, credPutPayload{
+			AccessKey: ak, SecretEnc: base64.StdEncoding.EncodeToString(enc), Bucket: name,
+		}); err != nil {
+			return err
+		}
+		cred = &Cred{AccessKey: ak, Secret: sk, Bucket: name}
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return cred, nil
 }
 
+// DeleteBucket 删除空桶并同事务级联删除其绑定凭据（99-D025）：桶在=钥在，
+// 桶亡=钥亡——已删桶的旧凭据即刻失效，不存在"数据面复活已删桶"的窗口。
+// 同事务落 bucket_delete + cred_delete 双 op（复用现有 op 类型，复制协议零变更）。
 func (s *Store) DeleteBucket(ctx context.Context, name string) error {
 	return s.mutate(ctx, func(t *meta.Tx) error {
 		b, err := t.GetBucket(name)
@@ -190,8 +238,25 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) error {
 		if b.Objects > 0 {
 			return fmt.Errorf("%w: bucket %q has %d objects", errs.ErrDirNotEmpty, name, b.Objects)
 		}
+		if n, uerr := t.CountUploads(name); uerr != nil {
+			return uerr
+		} else if n > 0 {
+			return fmt.Errorf("%w: bucket %q has %d in-flight multipart uploads", errs.ErrDirNotEmpty, name, n)
+		}
 		if err := t.DeleteBucket(name); err != nil {
 			return err
+		}
+		row, gerr := t.GetCredByBucket(name)
+		if gerr != nil && !errors.Is(gerr, errs.ErrKeyNotFound) {
+			return gerr
+		}
+		if row != nil {
+			if err := t.DeleteCredByBucket(name); err != nil {
+				return err
+			}
+			if err := appendOp(t, s.currentEpoch(), meta.OpCredDelete, credDeletePayload{AccessKey: row.AccessKey}); err != nil {
+				return err
+			}
 		}
 		return appendOp(t, s.currentEpoch(), meta.OpBucketDelete, bucketPayload{Name: name})
 	})
@@ -228,14 +293,31 @@ func (s *Store) BucketStat(ctx context.Context, name string) (*BucketStat, error
 	if err != nil {
 		return nil, err
 	}
-	return &BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects, Public: b.Public}, nil
+	st := &BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects, Public: b.Public, SecretOK: true}
+	if row, cerr := s.meta.GetCredByBucket(ctx, name); cerr == nil {
+		st.AccessKey = row.AccessKey
+		if _, oerr := s.open(row.SecretEnc); oerr != nil {
+			st.SecretOK = false // 当前 KEK 解不开：需 rotate 恢复（docs/02）
+		}
+	} else if !errors.Is(cerr, errs.ErrKeyNotFound) {
+		return nil, cerr
+	}
+	return st, nil
 }
 
-// ListBucketStats 返回全部桶用量（admin status 与 metrics 用）。
+// ListBucketStats 返回全部桶用量（admin status 与 metrics 用；含绑定 AK 与密文可读性）。
 func (s *Store) ListBucketStats(ctx context.Context) ([]BucketStat, error) {
 	names, err := s.meta.ListBuckets(ctx)
 	if err != nil {
 		return nil, err
+	}
+	creds, err := s.meta.ListCreds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byBucket := make(map[string]meta.CredRow, len(creds))
+	for _, r := range creds {
+		byBucket[r.Bucket] = r
 	}
 	out := make([]BucketStat, 0, len(names))
 	for _, name := range names {
@@ -243,7 +325,14 @@ func (s *Store) ListBucketStats(ctx context.Context) ([]BucketStat, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects, Public: b.Public})
+		st := BucketStat{Name: b.Name, Quota: b.Quota, Used: b.Used, Pending: b.Pending, Objects: b.Objects, Public: b.Public, SecretOK: true}
+		if row, ok := byBucket[name]; ok {
+			st.AccessKey = row.AccessKey
+			if _, oerr := s.open(row.SecretEnc); oerr != nil {
+				st.SecretOK = false
+			}
+		}
+		out = append(out, st)
 	}
 	return out, nil
 }
@@ -296,22 +385,48 @@ func (s *Store) Snapshot(ctx context.Context) (path string, seq int64, err error
 
 // ReplaceMeta 用快照文件替换本地元数据库并重开（从节点 Bootstrap 专用；
 // 调用方须保证此时无并发访问——同步循环已停、节点不对外服务）。
+// 安全序（S-14）：先打开校验快照可读 → 旧库改名 .bak 暂存（不直接删）→
+// 原子改名接管 → 重开失败则回滚 .bak，任意时刻磁盘上都有完整元数据文件。
 func (s *Store) ReplaceMeta(snapPath string) error {
+	// 1. 预校验：快照必须是可打开、可查询的 SQLite 库（拦截传输损坏/截断）
+	if chk, err := meta.Open(snapPath); err != nil {
+		return fmt.Errorf("validate snapshot: %w", err)
+	} else {
+		if _, lerr := chk.LastSeq(context.Background()); lerr != nil {
+			chk.Close()
+			return fmt.Errorf("validate snapshot: %w", lerr)
+		}
+		chk.Close()
+		for _, suffix := range []string{"-wal", "-shm"} { // 校验打开可能产生的伴生文件
+			os.Remove(snapPath + suffix)
+		}
+	}
 	metaPath := filepath.Join(s.cfg.DataDir, "meta.db")
+	backup := metaPath + ".bak"
+	os.Remove(backup)
 	if err := s.meta.Close(); err != nil {
 		return err
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if err := os.Remove(metaPath + suffix); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	// 2. 旧库暂存（含伴生文件）；失败窗口内 .bak 兜底
+	for _, suffix := range []string{"-wal", "-shm"} {
+		os.Remove(metaPath + suffix)
 	}
+	if err := os.Rename(metaPath, backup); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// 3. 快照原子接管；重开失败回滚 .bak
 	if err := os.Rename(snapPath, metaPath); err != nil {
+		os.Rename(backup, metaPath)
 		return err
 	}
 	m, err := meta.Open(metaPath)
 	if err != nil {
+		os.Remove(metaPath)
+		os.Rename(backup, metaPath)
 		return fmt.Errorf("reopen meta after bootstrap: %w", err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Chmod(metaPath+suffix, 0o600)
 	}
 	s.meta = m
 	return nil

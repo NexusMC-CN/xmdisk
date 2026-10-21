@@ -18,6 +18,7 @@ func newStore(t *testing.T) *store.Store {
 		Epoch:          1,
 		SmallThreshold: 1 << 20,
 		ChunkSize:      4 << 20,
+		KEK:            []byte("pubread-test-kek"), // 建桶即发钥（99-D025）
 		GCGrace:        time.Hour,
 	})
 	if err != nil {
@@ -32,10 +33,10 @@ func newStore(t *testing.T) *store.Store {
 func TestPublicRead(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
-	if err := s.CreateBucket(ctx, "pub", nil, true); err != nil {
+	if _, err := s.CreateBucket(ctx, "pub", nil, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateBucket(ctx, "priv", nil, false); err != nil {
+	if _, err := s.CreateBucket(ctx, "priv", nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Put(ctx, "pub", "a/b.txt", strings.NewReader("hello-public"), store.PutOptions{ContentType: "text/plain"}); err != nil {

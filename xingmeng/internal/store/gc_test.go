@@ -217,3 +217,66 @@ func TestGCStaleUploads(t *testing.T) {
 		t.Fatalf("pending after abort: %v %+v", err, bs)
 	}
 }
+
+// TestOplogTruncationAndActiveWindow oplog 截断与"有效从节点"门控（99-D026，S-02/S-03）：
+// 僵尸注册（活跃窗口外）既不阻塞清扫也不参与截断；活跃从节点 ack 过的部分
+// 在保留期外被截断；无活跃从节点不截断。
+func TestOplogTruncationAndActiveWindow(t *testing.T) {
+	s, err := Open(Config{
+		DataDir:           t.TempDir(),
+		Epoch:             1,
+		SmallThreshold:    1 << 20,
+		ChunkSize:         4 << 20,
+		KEK:               []byte("gc-test-kek"),
+		GCGrace:           time.Nanosecond,    // 立即可清扫
+		OplogRetention:    time.Nanosecond,    // 立即可截断
+		SlaveActiveWindow: 7 * 24 * time.Hour, // 默认窗口
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	s.CreateBucket(ctx, "bkt", nil, false)
+	mustPut(t, s, "bkt", "k1", randBytes(t, 8<<10), PutOptions{})
+	mustPut(t, s, "bkt", "k2", randBytes(t, 8<<10), PutOptions{})
+
+	// 僵尸注册：last_seen 在窗口外（S-03——此前它会永久堵死清扫与截断）
+	ghostSeen := time.Now().Add(-8 * 24 * time.Hour).UnixNano()
+	if err := s.meta.RegisterSlave(ctx, "ghost", ghostSeen); err != nil {
+		t.Fatalf("register ghost: %v", err)
+	}
+	if err := s.AckSlave(ctx, "ghost", 0, ghostSeen); err != nil {
+		t.Fatalf("ack ghost: %v", err)
+	}
+	// 僵尸不阻塞清扫：删对象 → GC 一轮即物理清扫（gate 对僵尸开放）
+	if err := s.Delete(ctx, "bkt", "k1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	res, err := s.RunGCOnce(ctx)
+	if err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	if !res.GateOpen || res.Swept != 1 {
+		t.Fatalf("ghost registration must not block sweep: %+v", res)
+	}
+	// 无活跃从节点：不截断
+	if n, err := s.maybeTruncateOplog(ctx); err != nil || n != 0 {
+		t.Fatalf("no active slave must not truncate: n=%d err=%v", n, err)
+	}
+	// 活跃从节点 ack 到最新 → 截断生效
+	last, _ := s.LastSeq(ctx)
+	if err := s.AckSlave(ctx, "live", last, time.Now().UnixNano()); err != nil {
+		t.Fatalf("ack live: %v", err)
+	}
+	n, err := s.maybeTruncateOplog(ctx)
+	if err != nil || n == 0 {
+		t.Fatalf("active acked slave must allow truncation: n=%d err=%v", n, err)
+	}
+	opsLeft, _ := s.Ops(ctx, 0, 1000)
+	for _, op := range opsLeft {
+		if op.Seq <= last {
+			t.Fatalf("acked prefix must be truncated, found op %d", op.Seq)
+		}
+	}
+}

@@ -81,6 +81,15 @@ func (d *DB) LastSeq(ctx context.Context) (int64, error) {
 	return seq, err
 }
 
+// MaxSeqBeforeTs 返回 ts_ns < beforeNs 的最大 op seq（0 = 没有足够老的 op）。
+// oplog 截断保留界计算用（99-D026）。
+func (d *DB) MaxSeqBeforeTs(ctx context.Context, beforeNs int64) (int64, error) {
+	var seq int64
+	err := d.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(seq), 0) FROM oplog WHERE ts_ns < ?`, beforeNs).Scan(&seq)
+	return seq, err
+}
+
 // TruncateOplog 删除 seq 小于 before 的 op，返回删除条数（日志截断，03 文档）。
 func (d *DB) TruncateOplog(ctx context.Context, before int64) (int64, error) {
 	res, err := d.db.ExecContext(ctx, `DELETE FROM oplog WHERE seq < ?`, before)

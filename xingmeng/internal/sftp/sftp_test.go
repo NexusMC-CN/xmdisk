@@ -18,9 +18,9 @@ import (
 	"xingmeng/internal/store"
 )
 
-const (
-	testAK     = "SFTPUSER1"
-	testSK     = "sftp-secret-0123456789"
+var (
+	testAK     string // 建桶返回的服务端生成凭据（99-D025）
+	testSK     string
 	testBucket = "sf-bkt"
 )
 
@@ -38,12 +38,11 @@ func startTestServer(t *testing.T) (*Server, net.Addr, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	if err := st.CreateBucket(context.Background(), testBucket, nil, false); err != nil {
+	cred, err := st.CreateBucket(context.Background(), testBucket, nil, false)
+	if err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
-	if err := st.CreateCred(context.Background(), testAK, testSK, testBucket); err != nil {
-		t.Fatalf("create cred: %v", err)
-	}
+	testAK, testSK = cred.AccessKey, cred.Secret
 	srv, err := NewServer(st, t.TempDir())
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -239,9 +238,11 @@ func TestSFTPAuthAndErrors(t *testing.T) {
 	// 写到配额满的桶：OS 层权限错误（映射自 QuotaExceeded）
 	ctx := context.Background()
 	quota := int64(1 << 20)
-	st.CreateBucket(ctx, "tiny", &quota, false)
-	st.CreateCred(ctx, "TINYAK1", "tiny-secret-0123", "tiny")
-	tiny := dialSFTP(t, addr, "TINYAK1", "tiny-secret-0123")
+	tinyCred, cerr := st.CreateBucket(ctx, "tiny", &quota, false)
+	if cerr != nil {
+		t.Fatalf("create tiny bucket: %v", cerr)
+	}
+	tiny := dialSFTP(t, addr, tinyCred.AccessKey, tinyCred.Secret)
 	f, err := tiny.Create("/big.bin")
 	if err != nil {
 		t.Fatalf("tiny create: %v", err)

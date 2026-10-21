@@ -94,14 +94,10 @@ func TestFailoverRunbook(t *testing.T) {
 	adminSrv := httptest.NewServer(AdminRouter(master, RouterConfig{AdminToken: admTok}))
 	defer adminSrv.Close()
 
-	// 经 admin API 造数据（桶 + 凭据 + 对象）
-	if code, out := adminCall(t, adminSrv.URL, "POST", "/buckets", map[string]any{"name": "bkt"}); code != 200 {
-		t.Fatalf("create bucket: %d %v", code, out)
-	}
-	if code, out := adminCall(t, adminSrv.URL, "POST", "/creds", map[string]any{
-		"access_key": "OPAK01", "secret": "op-secret-0123456789", "bucket": "bkt",
-	}); code != 200 {
-		t.Fatalf("create cred: %d %v", code, out)
+	// 经 admin API 造数据（建桶即发钥，99-D025 + 对象）
+	if code, out := adminCall(t, adminSrv.URL, "POST", "/buckets", map[string]any{"name": "bkt"}); code != 200 ||
+		out["access_key"] == "" || out["secret"] == "" {
+		t.Fatalf("create bucket must issue credential once: %d %v", code, out)
 	}
 	for _, k := range []string{"a", "b"} {
 		if _, err := master.Store().Put(ctx, "bkt", k, strings.NewReader("data-"+k), store.PutOptions{}); err != nil {
@@ -532,4 +528,69 @@ func statusInto(t *testing.T, base, path string, out any) int {
 		t.Fatalf("decode: %v", err)
 	}
 	return resp.StatusCode
+}
+
+// TestBucketCredLifecycle 桶凭据 API 全流程（99-D025）：建桶即发钥一次性返回、
+// 独立凭据接口已移除、rotate 挂桶路径保 AK 换 SK、在途 multipart 阻止删桶
+// （S-19）、删桶级联删钥、health 暴露密封凭据可读性。
+func TestBucketCredLifecycle(t *testing.T) {
+	ctx := context.Background()
+	n, err := node.Start(ctx, testConfig(t, "master", t.TempDir()+"/m", ""), []byte("life-kek"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+	srv := httptest.NewServer(AdminRouter(n, RouterConfig{AdminToken: admTok}))
+	defer srv.Close()
+
+	code, out := adminCall(t, srv.URL, "POST", "/buckets", map[string]any{"name": "bkt"})
+	if code != 200 || out["access_key"] == "" || out["secret"] == "" {
+		t.Fatalf("create bucket must return AK+SK once: %d %v", code, out)
+	}
+	ak, sk := out["access_key"].(string), out["secret"].(string)
+	cred, err := n.Store().LookupCred(ctx, ak)
+	if err != nil || cred.Secret != sk || cred.Bucket != "bkt" {
+		t.Fatalf("issued cred must authenticate: %v %+v", err, cred)
+	}
+
+	// 独立凭据接口已移除（路由不存在 → 404）
+	for _, m := range []string{"GET", "POST"} {
+		if code, _ := adminCall(t, srv.URL, m, "/creds", nil); code != 404 {
+			t.Fatalf("%s /creds must be gone, got %d", m, code)
+		}
+	}
+
+	// rotate 挂桶路径：AK 不变、SK 换新
+	code, out = adminCall(t, srv.URL, "POST", "/buckets/bkt/rotate", nil)
+	if code != 200 || out["access_key"] != ak || out["secret"] == "" || out["secret"] == sk {
+		t.Fatalf("rotate: %d %v", code, out)
+	}
+
+	// 在途 multipart 阻止删桶（S-19）
+	upID, err := n.Store().MpBegin(ctx, "bkt", "pending.bin", store.PutOptions{})
+	if err != nil {
+		t.Fatalf("mp begin: %v", err)
+	}
+	if code, out := adminCall(t, srv.URL, "DELETE", "/buckets/bkt", nil); code != 400 {
+		t.Fatalf("in-flight upload must block bucket delete: %d %v", code, out)
+	}
+	if err := n.Store().MpAbort(ctx, upID); err != nil {
+		t.Fatalf("mp abort: %v", err)
+	}
+
+	// health：密封凭据可读性（docs/02 自检）
+	if code, out := adminCall(t, srv.URL, "GET", "/health", nil); code != 200 || out["sealed_secrets"].(float64) < 1 || out["sealed_secrets_unreadable"].(float64) != 0 {
+		t.Fatalf("health must report sealed secrets: %d %v", code, out)
+	}
+
+	// 删桶级联删钥：桶亡=钥亡
+	if code, _ := adminCall(t, srv.URL, "DELETE", "/buckets/bkt", nil); code != 204 {
+		t.Fatalf("delete bucket must 204")
+	}
+	if _, err := n.Store().LookupCred(ctx, ak); err == nil {
+		t.Fatalf("bucket delete must cascade-revoke credential")
+	}
+	if code, _ := adminCall(t, srv.URL, "POST", "/buckets/bkt/rotate", nil); code != 400 {
+		t.Fatalf("rotate on missing bucket must 400, got %d", code)
+	}
 }

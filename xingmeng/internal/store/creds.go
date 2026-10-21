@@ -7,8 +7,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"xingmeng/internal/errs"
@@ -45,7 +48,23 @@ type CredInfo struct {
 
 var accessKeyRe = regexp.MustCompile(`^[A-Za-z0-9]{4,64}$`)
 
-// CreateCred 创建桶级凭据并复制（oplog 记密文；主密钥丢失走批量重置，docs/02）。
+// genAccessKey / genSecret 服务端生成强凭据（99-D025：AK/SK 均不由使用方提供）。
+// AK 带 xm 前缀便于日志排障识别；80 位随机熵，碰撞由唯一约束兜底重试。
+func genAccessKey() string {
+	raw := make([]byte, 10)
+	rand.Read(raw)
+	return "xm" + hex.EncodeToString(raw)
+}
+
+func genSecret() string {
+	raw := make([]byte, 24)
+	rand.Read(raw)
+	return hex.EncodeToString(raw)
+}
+
+// CreateCred 插入或覆盖凭据（测试与内部原语；admin 面已不暴露——凭据随桶
+// 生灭，99-D025）。一桶一密由 idx_creds_bucket 唯一索引兜底：同桶第二把
+// 不同 AK 被拒；同 AK 覆盖（KEK 丢失重置路径）不受影响。
 func (s *Store) CreateCred(ctx context.Context, accessKey, secret, bucket string) error {
 	if len(s.cfg.KEK) == 0 {
 		return fmt.Errorf("%w: KEK not configured", errs.ErrInvalidArgument)
@@ -65,6 +84,9 @@ func (s *Store) CreateCred(ctx context.Context, accessKey, secret, bucket string
 			return err
 		}
 		if err := t.InsertCred(accessKey, enc, bucket, time.Now().UnixNano()); err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				return fmt.Errorf("%w: %q already has a credential (one per bucket, 99-D025)", errs.ErrInvalidArgument, bucket)
+			}
 			return err
 		}
 		return appendOp(t, s.currentEpoch(), meta.OpCredPut, credPutPayload{
@@ -72,6 +94,64 @@ func (s *Store) CreateCred(ctx context.Context, accessKey, secret, bucket string
 			Bucket: bucket,
 		})
 	})
+}
+
+// RotateBucketCred 重置桶凭据：保留 AK、换新 SK（保持 AK 的唯一随机性即可，
+// SK 碰撞无意义）。无钥桶（旧二进制所建）自愈补发 AK+SK（99-D025）。
+// "冻结租户" = rotate 到不外发的新 SK（可逆：再 rotate 发给租户）。
+func (s *Store) RotateBucketCred(ctx context.Context, bucket string) (*Cred, error) {
+	if len(s.cfg.KEK) == 0 {
+		return nil, fmt.Errorf("%w: KEK not configured", errs.ErrInvalidArgument)
+	}
+	sk := genSecret()
+	var ak string
+	err := s.mutate(ctx, func(t *meta.Tx) error {
+		if _, err := t.GetBucket(bucket); err != nil {
+			return err
+		}
+		row, gerr := t.GetCredByBucket(bucket)
+		if gerr != nil && !errors.Is(gerr, errs.ErrKeyNotFound) {
+			return gerr
+		}
+		if row != nil {
+			ak = row.AccessKey
+		} else {
+			ak = genAccessKey() // 无钥桶自愈
+		}
+		enc, serr := s.seal(sk)
+		if serr != nil {
+			return serr
+		}
+		if err := t.InsertCred(ak, enc, bucket, time.Now().UnixNano()); err != nil {
+			return err
+		}
+		return appendOp(t, s.currentEpoch(), meta.OpCredPut, credPutPayload{
+			AccessKey: ak, SecretEnc: base64.StdEncoding.EncodeToString(enc), Bucket: bucket,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Cred{AccessKey: ak, Secret: sk, Bucket: bucket}, nil
+}
+
+// SealedSecretsStatus 密封凭据健康自检（docs/02：KEK 更换后定位待轮换桶）。
+// unreadable = 当前 KEK 解不开的条数（对应桶需逐个 rotate 恢复）。
+func (s *Store) SealedSecretsStatus(ctx context.Context) (total, unreadable int, err error) {
+	if len(s.cfg.KEK) == 0 {
+		return 0, 0, nil
+	}
+	rows, err := s.meta.ListCreds(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, r := range rows {
+		total++
+		if _, oerr := s.open(r.SecretEnc); oerr != nil {
+			unreadable++
+		}
+	}
+	return total, unreadable, nil
 }
 
 // LookupCred 供 S3 鉴权：未配置 KEK / 无此凭据 / 已停用 / 解密失败

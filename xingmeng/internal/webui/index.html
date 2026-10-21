@@ -75,7 +75,6 @@ code{background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px}
   <nav id="tabs">
     <button data-t="ov" class="on">概览</button>
     <button data-t="bk">存储桶</button>
-    <button data-t="cr">凭据</button>
     <button data-t="op">运维</button>
     <button data-t="cl">集群</button>
     <button data-t="cn">连接</button>
@@ -87,17 +86,10 @@ code{background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px}
   </section>
 
   <section id="t-bk" style="display:none">
-    <div class="card"><h3>新建存储桶</h3>
+    <div class="card"><h3>新建存储桶（即发唯一凭据）</h3>
       <div class="row">名称 <input id="bk-name" placeholder="小写字母/数字/连字符，3-63 位"> 配额(GB，留空不限) <input id="bk-quota" style="width:90px"> <button class="primary" id="bk-add">创建</button></div>
-      <p class="hint">桶名规则与 S3 一致；配额按逻辑字节计（含 multipart 在途）。</p></div>
-    <div class="card"><h3>存储桶列表</h3><table id="bk-tb"><thead><tr><th>桶</th><th>用量</th><th>对象数</th><th>配额(GB)</th><th>公共读</th><th>操作</th></tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section id="t-cr" style="display:none">
-    <div class="card"><h3>新建凭据</h3>
-      <div class="row">AccessKey <input id="cr-ak" placeholder="4-64 位字母数字"> 桶 <select id="cr-bk"></select> Secret <input id="cr-sk" placeholder="留空自动生成" type="password"> <button class="primary" id="cr-add">创建</button></div>
-      <p class="hint">凭据绑定单个桶（三协议租户隔离）；Secret 服务端生成时仅创建这一次展示。</p></div>
-    <div class="card"><h3>凭据列表</h3><table id="cr-tb"><thead><tr><th>AccessKey</th><th>桶</th><th>操作</th></tr></thead><tbody></tbody></table></div>
+      <p class="hint">桶=租户=一把钥匙（99-D025）：AK/SK 由服务端生成，Secret 仅创建后展示一次；配额按逻辑字节计（含 multipart 在途）。</p></div>
+    <div class="card"><h3>存储桶列表</h3><table id="bk-tb"><thead><tr><th>桶 / AccessKey</th><th>用量</th><th>对象数</th><th>配额(GB)</th><th>公共读</th><th>操作</th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section id="t-op" style="display:none">
@@ -206,8 +198,7 @@ async function enter(){
 }
 
 // ---- 概览/集群共用的状态 ----
-let LAST=null;
-async function refreshAll(){
+let LAST=null;async function refreshAll(){
   try{
     const [st,bks]=await Promise.all([api("GET","/status"),api("GET","/buckets").catch(()=>[])]);
     LAST={st,bks};
@@ -216,7 +207,7 @@ async function refreshAll(){
     const rm=$("#role-mismatch");
     if(st.node.role_mismatch){rm.style.display="";rm.innerHTML=`运行角色与配置初值不一致：节点以 <b>${esc(role)}</b> 运行（初值 ${esc(st.node.configured_role)}）。初值仅是出生设置，promote 后属正常现象，无需处理（99-D023）。`}
     else rm.style.display="none";
-    renderOv();renderBk();renderCr();renderOp();renderCl();renderCn();
+    renderOv();renderBk();renderOp();renderCl();renderCn();
     fillBkSelects();
   }catch(e){toast(e.message,false)}
 }
@@ -235,11 +226,13 @@ function renderOv(){
   $("#ov-bk tbody").innerHTML=LAST.bks.length?LAST.bks.map(b=>`<tr><td>${esc(b.Name||b.name)}</td><td>${fmtB(b.Used??b.used)}</td><td>${b.Objects??b.objects}</td><td>${fmtB(b.Pending??b.pending)}</td><td>${(b.Quota??b.quota)!=null?fmtB(b.Quota??b.quota):"不限"}</td></tr>`).join(""):`<tr><td colspan="5" class="muted">暂无桶</td></tr>`;
 }
 
-// ---- 桶 ----
+// ---- 桶（99-D025：桶=租户=一把钥匙，凭据随桶生灭）----
 function renderBk(){
-  $("#bk-tb tbody").innerHTML=LAST.bks.length?LAST.bks.map(b=>{const q=(b.Quota??b.quota),pub=b.Public??b.public;return`<tr><td>${esc(b.Name||b.name)}</td><td>${fmtB(b.Used??b.used)}</td><td>${b.Objects??b.objects}</td><td>${q!=null?(q/2**30).toFixed(1):"不限"}</td>
+  $("#bk-tb tbody").innerHTML=LAST.bks.length?LAST.bks.map(b=>{const q=(b.Quota??b.quota),pub=b.Public??b.public,
+    ak=b.AccessKey??b.access_key,ok=b.SecretOK??b.secret_ok;
+    return`<tr><td>${esc(b.Name||b.name)}<br><code>${esc(ak||"（无钥桶）")}</code>${ok===false?' <span class="tag" style="background:#fee2e2;color:#991b1b">密钥不可读·需轮换</span>':""}</td><td>${fmtB(b.Used??b.used)}</td><td>${b.Objects??b.objects}</td><td>${q!=null?(q/2**30).toFixed(1):"不限"}</td>
     <td>${pub?'<span class="tag ok">公共读</span>':'<span class="tag off">私有</span>'} <button onclick="bkPub('${esc(b.Name||b.name)}',${pub?"false":"true"})">${pub?"关闭":"开启"}</button></td>
-    <td><button onclick="bkQuota('${esc(b.Name||b.name)}',${q||"null"})">改配额</button> <button class="danger" onclick="bkDel('${esc(b.Name||b.name)}')">删除</button></td></tr>`}).join(""):`<tr><td colspan="6" class="muted">暂无桶</td></tr>`;
+    <td><button onclick="bkRot('${esc(b.Name||b.name)}')">重置密钥</button> <button onclick="bkQuota('${esc(b.Name||b.name)}',${q||"null"})">改配额</button> <button class="danger" onclick="bkDel('${esc(b.Name||b.name)}')">删除</button></td></tr>`}).join(""):`<tr><td colspan="6" class="muted">暂无桶</td></tr>`;
 }
 window.bkPub=async(name,to)=>{
   if(to && !confirm(`开启桶 ${name} 的公共读？\n\n公共读端口(:9004)上任何人可用 URL 直接读取该桶内的对象（写与列举仍需凭据）。这等于放弃该桶对象的访问控制，key 可猜测就意味着可读取。\n\n确认开启？`))return;
@@ -249,33 +242,17 @@ window.bkQuota=async(name,q)=>{const v=prompt(`桶 ${name} 的新配额（GB，�
   const body=v.trim()===""?{quota:null}:{quota:Math.round(parseFloat(v)*2**30)};
   if(body.quota&&(isNaN(body.quota)||body.quota<=0)){toast("配额必须是正数",false);return}
   try{await api("PATCH","/buckets/"+name,body);await refreshAll()}catch(e){toast(e.message,false)}};
-window.bkDel=async name=>{if(!confirm(`确认删除桶 ${name}？（仅能删除空桶）`))return;
+window.bkDel=async name=>{if(!confirm(`确认删除桶 ${name}？（仅能删除空桶；其绑定凭据将一并删除并立即失效）`))return;
   try{await api("DELETE","/buckets/"+name);await refreshAll()}catch(e){toast(e.message,false)}};
+window.bkRot=async name=>{if(!confirm(`重置桶 ${name} 的密钥？旧 Secret 立即失效，新 Secret 仅展示一次（AK 不变）。`))return;
+  try{const d=await api("POST",`/buckets/${name}/rotate`);
+    showSecret(d.access_key, d.secret, `桶 ${name} 的新 Secret（仅此一次展示）`);
+    await refreshAll();toast("已重置，请在弹窗保存新 Secret")}catch(e){toast(e.message,false)}};
 $("#bk-add").onclick=async()=>{const name=$("#bk-name").value.trim(),q=$("#bk-quota").value.trim();
   const body={name};if(q)body.quota=Math.round(parseFloat(q)*2**30);
-  try{await api("POST","/buckets",body);$("#bk-name").value="";$("#bk-quota").value="";await refreshAll()}catch(e){toast(e.message,false)}};
-
-// ---- 凭据 ----
-let CREDS=[];
-async function renderCr(){
-  try{CREDS=await api("GET","/creds")}catch(e){CREDS=[]}
-  $("#cr-tb tbody").innerHTML=CREDS.length?CREDS.map(c=>`<tr><td><code>${esc(c.AccessKey||c.access_key)}</code></td><td>${esc(c.Bucket||c.bucket)}</td>
-    <td><button onclick="crRot('${esc(c.AccessKey||c.access_key)}')">轮换 Secret</button> <button class="danger" onclick="crDel('${esc(c.AccessKey||c.access_key)}')">删除</button></td></tr>`).join(""):`<tr><td colspan="3" class="muted">暂无凭据</td></tr>`;
-}
-window.crRot=async ak=>{if(!confirm(`轮换 ${ak} 的 Secret？旧 Secret 立即失效，新值仅展示一次。`))return;
-  try{const d=await api("POST",`/creds/${ak}/rotate`);
-    showSecret(ak, d.secret, `${ak} 的新 Secret（仅此一次展示）`);
-    toast("已轮换，请在弹窗保存新 Secret")}catch(e){toast(e.message,false)}};
-window.crDel=async ak=>{if(!confirm(`确认删除凭据 ${ak}？使用它的客户端将立即无法访问。`))return;
-  try{await api("DELETE","/creds/"+ak);await refreshAll()}catch(e){toast(e.message,false)}};
-$("#cr-add").onclick=async()=>{
-  const ak=$("#cr-ak").value.trim(),bk=$("#cr-bk").value,sk=$("#cr-sk").value;
-  if(!bk){toast("请先创建桶",false);return}
-  const body={access_key:ak,bucket:bk};if(sk)body.secret=sk;
-  try{const d=await api("POST","/creds",body);
-    $("#cr-ak").value="";$("#cr-sk").value="";
+  try{const d=await api("POST","/buckets",body);$("#bk-name").value="";$("#bk-quota").value="";
     await refreshAll();
-    if(d.secret)showSecret(ak, d.secret, `${ak} 的 Secret（仅此一次展示）`);
+    showSecret(d.access_key, d.secret, `桶 ${name} 的凭据（仅此一次展示）`);
   }catch(e){toast(e.message,false)}};
 
 // ---- 运维 ----
@@ -318,7 +295,10 @@ $("#cl-clear").onclick=async()=>{if(!confirm("清除运行时 token？（回落 
 
 // ---- 连接 ----
 function fillBkSelects(){const opts=LAST.bks.map(b=>`<option>${esc(b.Name||b.name)}</option>`).join("");
-  $("#cr-bk").innerHTML=opts||`<option value="">（请先建桶）</option>`;$("#cn-bk").innerHTML=opts||`<option value="">（无桶）</option>`}
+  $("#cn-bk").innerHTML=opts||`<option value="">（无桶）</option>`;fillCnAK()}
+// 一桶一密：选桶即带入该桶绑定 AK（仍可手改）
+function fillCnAK(){const bk=$("#cn-bk").value,b=LAST.bks.find(x=>(x.Name||x.name)===bk);
+  if(b)$("#cn-ak").value=b.AccessKey??b.access_key??"";renderSnip()}
 function baseUrls(){
   const n=LAST.st.node,pe=n.public_endpoint;
   let host=location.hostname;
@@ -353,12 +333,12 @@ rclone copy ./file.bin xm:${bk}/
     addCopy();
   } else pubEl.style.display="none";
 }
-$("#cn-bk").onchange=$("#cn-ak").oninput=renderSnip;
+$("#cn-bk").onchange=fillCnAK;$("#cn-ak").oninput=renderSnip;
 
 // ---- 标签页 ----
 $("#tabs").onclick=e=>{const b=e.target.closest("button");if(!b)return;
   $$("#tabs button").forEach(x=>x.classList.toggle("on",x===b));
-  ["ov","bk","cr","op","cl","cn"].forEach(t=>$("#t-"+t).style.display=t===b.dataset.t?"":"none")};
+  ["ov","bk","op","cl","cn"].forEach(t=>$("#t-"+t).style.display=t===b.dataset.t?"":"none")};
 
 $("#btn-login").onclick=login;
 $("#l-tok").addEventListener("keydown",e=>{if(e.key==="Enter")login()});

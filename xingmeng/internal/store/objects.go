@@ -376,11 +376,12 @@ func (s *Store) putDir(ctx context.Context, bucket, key string, opts PutOptions)
 // ---- List ----
 
 // List 前缀列举；delim 非空时聚合 CommonPrefixes（S3 ListV2 与树形列目录共用）。
+// max=0 合法（S3 语义：返回空列表 + IsTruncated）；负数或超 10000 回默认。
 func (s *Store) List(ctx context.Context, bucket, prefix, delim, after string, max int) (*ListResult, error) {
 	if _, err := s.meta.GetBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
-	if max <= 0 || max > 10000 {
+	if max < 0 || max > 10000 {
 		max = 10000
 	}
 	lo, hi := meta.PrefixRange([]byte(prefix))
@@ -419,7 +420,7 @@ func (s *Store) List(ctx context.Context, bucket, prefix, delim, after string, m
 					}
 					if len(res.Items)+len(res.CommonPrefixes) >= max {
 						res.Truncated = true
-						res.NextAfter = emitToken(lastEmitted, lastWasCP)
+						res.NextAfter = truncToken(lastEmitted, lastWasCP, cp, true)
 						return res, nil
 					}
 					res.CommonPrefixes = append(res.CommonPrefixes, cp)
@@ -429,7 +430,7 @@ func (s *Store) List(ctx context.Context, bucket, prefix, delim, after string, m
 			}
 			if len(res.Items)+len(res.CommonPrefixes) >= max {
 				res.Truncated = true
-				res.NextAfter = emitToken(lastEmitted, lastWasCP)
+				res.NextAfter = truncToken(lastEmitted, lastWasCP, e.Key, false)
 				return res, nil
 			}
 			oi, err := objInfo(&e)
@@ -452,6 +453,15 @@ func emitToken(key string, isCP bool) string {
 		return key + "\x00"
 	}
 	return key
+}
+
+// truncToken 截断时的续传 token：已输出条目沿用其自身形态（条目/CP）；
+// 一条未输出（max=0，S3 语义）时用当前条目起步，保证翻页从截断点继续。
+func truncToken(lastEmitted string, lastWasCP bool, curKey string, curIsCP bool) string {
+	if lastEmitted != "" {
+		return emitToken(lastEmitted, lastWasCP)
+	}
+	return emitToken(curKey, curIsCP)
 }
 
 // ---- 内部工具 ----

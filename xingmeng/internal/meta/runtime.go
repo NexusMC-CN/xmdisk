@@ -37,6 +37,23 @@ func (d *DB) MinSlaveAck(ctx context.Context) (min int64, exists bool, err error
 	return min, n > 0, err
 }
 
+// MinActiveSlaveAck 返回活跃从节点（last_seen ≥ activeSinceNs）的最小 ack seq；
+// exists 为 false 表示窗口内无活跃从节点。僵尸注册（登记后从未心跳）不计入——
+// 防 GC 清扫门控与 oplog 截断被永久阻塞（S-03，99-D026）。
+func (d *DB) MinActiveSlaveAck(ctx context.Context, activeSinceNs int64) (min int64, exists bool, err error) {
+	var n int
+	err = d.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MIN(last_acked), 0) FROM slaves WHERE last_seen_ns >= ?`,
+		activeSinceNs).Scan(&n, &min)
+	return min, n > 0, err
+}
+
+// TouchSlaveSeen 刷新从节点 last_seen（心跳；活跃窗口判定的数据源，99-D026）。
+func (d *DB) TouchSlaveSeen(ctx context.Context, id string, nowNs int64) error {
+	_, err := d.db.ExecContext(ctx, `UPDATE slaves SET last_seen_ns = ? WHERE id = ?`, nowNs, id)
+	return err
+}
+
 // SetSlaveAck upsert 从节点进度（ack 心跳，repl 面调用）。
 func (d *DB) SetSlaveAck(ctx context.Context, id string, acked int64, nowNs int64) error {
 	_, err := d.db.ExecContext(ctx, `INSERT INTO slaves(id, last_acked, last_seen_ns) VALUES(?, ?, ?)
@@ -208,6 +225,13 @@ func (d *DB) UploadParts(ctx context.Context, uploadID string) ([]PartRow, error
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// CountUploads 返回桶内在途 multipart 会话数（删桶前置校验，99-D025）。
+func (t *Tx) CountUploads(bucket string) (int64, error) {
+	var n int64
+	err := t.tx.QueryRow(`SELECT COUNT(*) FROM uploads WHERE bucket = ?`, bucket).Scan(&n)
+	return n, err
 }
 
 // DeleteUpload 连带删除会话与其 parts 行（须在写事务内调用）。

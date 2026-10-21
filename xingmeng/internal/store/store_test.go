@@ -25,6 +25,7 @@ func openTest(t *testing.T) *Store {
 		Epoch:          1,
 		SmallThreshold: 1 << 20,
 		ChunkSize:      4 << 20,
+		KEK:            []byte("store-test-kek"), // 建桶即发钥（99-D025）需要 KEK
 	})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -74,7 +75,7 @@ func md5hex(b []byte) string {
 func TestPutGetRoundtrip(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if err := s.CreateBucket(ctx, "bkt", nil, false); err != nil {
+	if _, err := s.CreateBucket(ctx, "bkt", nil, false); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 	data := randBytes(t, 1<<20-100) // 单 blob 路径
@@ -182,7 +183,7 @@ func TestOverwriteAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ops: %v", err)
 	}
-	wantTypes := []string{meta.OpBucketCreate, meta.OpEntryPut, meta.OpEntryPut, meta.OpEntryDelete}
+	wantTypes := []string{meta.OpBucketCreate, meta.OpCredPut, meta.OpEntryPut, meta.OpEntryPut, meta.OpEntryDelete} // 建桶即发钥（99-D025）
 	if len(ops) != len(wantTypes) {
 		t.Fatalf("oplog len = %d, want %d", len(ops), len(wantTypes))
 	}
@@ -200,7 +201,7 @@ func TestQuota(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	quota := int64(1 << 20)
-	if err := s.CreateBucket(ctx, "qta", &quota, false); err != nil {
+	if _, err := s.CreateBucket(ctx, "qta", &quota, false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	mustPut(t, s, "qta", "a", randBytes(t, 600_000), PutOptions{})
@@ -340,13 +341,13 @@ func TestReadOnly(t *testing.T) {
 func TestBucketOps(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if err := s.CreateBucket(ctx, "Bad_Name", nil, false); !errors.Is(err, errs.ErrInvalidArgument) {
+	if _, err := s.CreateBucket(ctx, "Bad_Name", nil, false); !errors.Is(err, errs.ErrInvalidArgument) {
 		t.Fatalf("want InvalidArgument, got %v", err)
 	}
-	if err := s.CreateBucket(ctx, "okb", nil, false); err != nil {
+	if _, err := s.CreateBucket(ctx, "okb", nil, false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.CreateBucket(ctx, "okb", nil, false); !errors.Is(err, errs.ErrBucketExists) {
+	if _, err := s.CreateBucket(ctx, "okb", nil, false); !errors.Is(err, errs.ErrBucketExists) {
 		t.Fatalf("want BucketExists, got %v", err)
 	}
 	if err := s.DeleteBucket(ctx, "okb"); err != nil {
@@ -363,7 +364,7 @@ func TestBucketOps(t *testing.T) {
 	}
 
 	// 公共读标志（99-D024）：建桶即公共、运行时切换、跨重启持久（schema v3）
-	if err := s.CreateBucket(ctx, "pubb", nil, true); err != nil {
+	if _, err := s.CreateBucket(ctx, "pubb", nil, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetBucketPublic(ctx, "full", true); err != nil {
@@ -457,5 +458,51 @@ func TestOplogPayloadShape(t *testing.T) {
 	}
 	if _, ok := m["blobs"].([]any); !ok {
 		t.Fatalf("payload missing blobs array: %v", m)
+	}
+}
+
+// TestBucketCredModel 桶=租户=一把钥匙（99-D025）：建桶即发钥、一桶一密由
+// 唯一索引兜底、rotate 保 AK 换 SK、删桶级联删钥。
+func TestBucketCredModel(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	cred, err := s.CreateBucket(ctx, "bkt", nil, false)
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if len(cred.AccessKey) < 4 || len(cred.Secret) < 24 {
+		t.Fatalf("generated credential too weak: AK=%d SK=%d", len(cred.AccessKey), len(cred.Secret))
+	}
+	got, err := s.LookupCred(ctx, cred.AccessKey)
+	if err != nil || got.Secret != cred.Secret || got.Bucket != "bkt" {
+		t.Fatalf("issued cred must authenticate: %v %+v", err, got)
+	}
+
+	// 一桶一密：同桶第二把不同 AK 被拒（idx_creds_bucket）
+	if err := s.CreateCred(ctx, "OTHERAK1", "another-secret-0123456789", "bkt"); !errors.Is(err, errs.ErrInvalidArgument) {
+		t.Fatalf("second cred for same bucket must be rejected, got %v", err)
+	}
+	// 同 AK 覆盖保留（KEK 丢失批量重置路径，docs/02）
+	if err := s.CreateCred(ctx, cred.AccessKey, "reset-secret-0123456789", "bkt"); err != nil {
+		t.Fatalf("same-AK overwrite must work: %v", err)
+	}
+
+	// rotate：AK 不变、SK 换新、可鉴权
+	rot, err := s.RotateBucketCred(ctx, "bkt")
+	if err != nil || rot.AccessKey != cred.AccessKey || rot.Secret == "" {
+		t.Fatalf("rotate: %v %+v", err, rot)
+	}
+	got, err = s.LookupCred(ctx, cred.AccessKey)
+	if err != nil || got.Secret != rot.Secret {
+		t.Fatalf("rotated cred must authenticate: %v %+v", err, got)
+	}
+
+	// 删桶级联删钥：桶亡=钥亡（S-01 收口）
+	if err := s.DeleteBucket(ctx, "bkt"); err != nil {
+		t.Fatalf("delete bucket: %v", err)
+	}
+	if _, err := s.LookupCred(ctx, cred.AccessKey); err == nil {
+		t.Fatalf("bucket delete must cascade-revoke its credential")
 	}
 }

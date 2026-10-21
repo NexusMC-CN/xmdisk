@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,7 +27,17 @@ type handler struct {
 	store *store.Store
 }
 
+// internalErr 500 固定文案（S-06：不向匿名者泄露内部错误文本/路径），详情入日志。
+func internalErr(w http.ResponseWriter, r *http.Request, where string, err error) {
+	reqID := strconv.FormatInt(time.Now().UnixNano(), 36)
+	slog.Error("pubread internal error", "where", where, "err", err.Error(), "request_id", reqID, "remote", r.RemoteAddr)
+	http.Error(w, "internal error (request_id="+reqID+")", http.StatusInternalServerError)
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// nosniff：对象 Content-Type 由上传者控制，禁 MIME 嗅探（S-07；与"不发
+	// 缓存头"同立场——只做无副作用的加固，策略归反代）。
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -47,7 +58,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			notFound(w)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalErr(w, r, "bucket_stat", err)
 		return
 	}
 	if !b.Public {
@@ -60,7 +71,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			notFound(w)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalErr(w, r, "stat", err)
 		return
 	}
 
@@ -90,7 +101,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rng != nil {
 		rc, _, err := h.store.Get(r.Context(), bucket, key, rng)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			internalErr(w, r, "get_range", err)
 			return
 		}
 		defer rc.Close()
@@ -102,17 +113,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	w.Header().Set("Content-Length", strconv.FormatInt(oi.Size, 10))
-	w.WriteHeader(http.StatusOK)
-	if r.Method == http.MethodGet {
+	if r.Method == http.MethodGet { // 先开流后发 200（S-08）：开流失败应答 5xx 而非 200+截断
 		rc, _, err := h.store.Get(r.Context(), bucket, key, nil)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			internalErr(w, r, "get", err)
 			return
 		}
 		defer rc.Close()
+		w.Header().Set("Content-Length", strconv.FormatInt(oi.Size, 10))
+		w.WriteHeader(http.StatusOK)
 		io.Copy(w, rc)
+		return
 	}
+	w.Header().Set("Content-Length", strconv.FormatInt(oi.Size, 10))
+	w.WriteHeader(http.StatusOK)
 }
 
 func notFound(w http.ResponseWriter) {

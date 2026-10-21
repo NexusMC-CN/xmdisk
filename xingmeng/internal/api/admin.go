@@ -4,11 +4,10 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"xingmeng/internal/errs"
@@ -39,23 +38,22 @@ func AdminRouter(n *node.Node, rc RouterConfig) http.Handler {
 	mux.HandleFunc("GET /status", handleStatus(n))
 	mux.HandleFunc("GET /health", handleHealth(n))
 	mux.HandleFunc("GET /metrics", handleMetrics(n))
-	mux.HandleFunc("POST /serve", handleServe(n))
-	mux.HandleFunc("POST /sync", handleSync(n))
-	mux.HandleFunc("POST /promote", handlePromote(n))
-	mux.HandleFunc("POST /snapshot", masterOnly(n, handleSnapshot(n)))
-	mux.HandleFunc("POST /gc", handleGC(n))
+	mux.HandleFunc("POST /serve", audited(handleServe(n)))
+	mux.HandleFunc("POST /sync", audited(handleSync(n)))
+	mux.HandleFunc("POST /promote", audited(handlePromote(n)))
+	mux.HandleFunc("POST /snapshot", masterOnly(n, audited(handleSnapshot(n))))
+	mux.HandleFunc("POST /gc", audited(handleGC(n)))
 	mux.HandleFunc("POST /verify", handleVerify(n))
+	// 桶=租户=一把钥匙（99-D025）：建桶即发钥、删桶级联删钥、rotate 挂桶路径；
+	// 独立的凭据增删接口已移除（GET /creds 并入 GET /buckets）。
 	mux.HandleFunc("GET /buckets", handleListBuckets(n))
-	mux.HandleFunc("POST /buckets", handleCreateBucket(n))
-	mux.HandleFunc("DELETE /buckets/{name}", handleDeleteBucket(n))
-	mux.HandleFunc("PATCH /buckets/{name}", handlePatchBucket(n))
-	mux.HandleFunc("GET /creds", handleListCreds(n))
-	mux.HandleFunc("POST /creds", handleCreateCred(n))
-	mux.HandleFunc("POST /creds/{ak}/rotate", handleRotateCred(n))
-	mux.HandleFunc("DELETE /creds/{ak}", handleDeleteCred(n))
+	mux.HandleFunc("POST /buckets", audited(handleCreateBucket(n)))
+	mux.HandleFunc("DELETE /buckets/{name}", audited(handleDeleteBucket(n)))
+	mux.HandleFunc("PATCH /buckets/{name}", audited(handlePatchBucket(n)))
+	mux.HandleFunc("POST /buckets/{name}/rotate", audited(handleRotateBucketCred(n)))
 	// 集群配置（99-D023③：token 运行时设置，地址经 /sync）
-	mux.HandleFunc("POST /repl/token", handleSetReplToken(n))
-	mux.HandleFunc("DELETE /repl/token", handleSetReplToken(n))
+	mux.HandleFunc("POST /repl/token", audited(handleSetReplToken(n)))
+	mux.HandleFunc("DELETE /repl/token", audited(handleSetReplToken(n)))
 
 	// 管理页在鉴权之外（登录页必须先可见才能换会话；静态资源无秘密，99-D023⑥），
 	// 其余全部走双 token 鉴权。
@@ -105,6 +103,27 @@ func masterOnly(n *node.Node, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// audited 为 admin 变更类接口记审计日志（S-20：方法/路径/来源/结果码）。
+// 凭据族日志只含 AK，永不记 Secret。
+func audited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		next(rec, r)
+		slog.Info("admin audit", "method", r.Method, "path", r.URL.Path,
+			"remote", r.RemoteAddr, "status", rec.status)
+	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
 // ---- 状态 ----
 
 func handleStatus(n *node.Node) http.HandlerFunc {
@@ -130,7 +149,11 @@ func handleHealth(n *node.Node) http.HandlerFunc {
 			writeJSON(w, 503, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "role": st.Role, "serve": st.Serve, "kek_configured": st.KEKConfigured})
+		// 密封凭据健康自检（docs/02：KEK 更换后定位待轮换桶）
+		total, unreadable, _ := n.Store().SealedSecretsStatus(r.Context())
+		writeJSON(w, 200, map[string]any{"ok": true, "role": st.Role, "serve": st.Serve,
+			"kek_configured": st.KEKConfigured,
+			"sealed_secrets": total, "sealed_secrets_unreadable": unreadable})
 	}
 }
 
@@ -299,6 +322,8 @@ func handleListBuckets(n *node.Node) http.HandlerFunc {
 	}
 }
 
+// handleCreateBucket 建桶即发钥（99-D025）：同事务创建桶与凭据，AK/SK 服务端
+// 生成，Secret 仅此一次随响应返回（服务端只存 KEK 密文）。
 func handleCreateBucket(n *node.Node) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -311,11 +336,15 @@ func handleCreateBucket(n *node.Node) http.HandlerFunc {
 			return
 		}
 		public := req.Public != nil && *req.Public
-		if err := n.Store().CreateBucket(r.Context(), req.Name, req.Quota, public); err != nil {
+		cred, err := n.Store().CreateBucket(r.Context(), req.Name, req.Quota, public)
+		if err != nil {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"name": req.Name, "quota": req.Quota, "public": public})
+		writeJSON(w, 200, map[string]any{
+			"name": req.Name, "quota": req.Quota, "public": public,
+			"access_key": cred.AccessKey, "secret": cred.Secret, // 仅此一次
+		})
 	}
 }
 
@@ -380,87 +409,20 @@ func handlePatchBucket(n *node.Node) http.HandlerFunc {
 	}
 }
 
-// ---- 凭据 ----
+// ---- 凭据（99-D025：随桶生灭，仅保留 rotate）----
 
-func handleListCreds(n *node.Node) http.HandlerFunc {
+// handleRotateBucketCred 重置桶凭据 Secret（保留 AK；无钥桶自愈补发 AK+SK）。
+// "冻结租户" = rotate 到不外发的新 SK（可逆：再 rotate 发给租户）。
+func handleRotateBucketCred(n *node.Node) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		creds, err := n.Store().ListCreds(r.Context())
+		cred, err := n.Store().RotateBucketCred(r.Context(), r.PathValue("name"))
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, 200, creds)
-	}
-}
-
-// handleCreateCred 创建或覆盖凭据；secret 省略时服务端生成并在响应中
-// 返回一次（批量重置 KEK 丢失场景的原子单位，docs/02）。
-func handleCreateCred(n *node.Node) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			AccessKey string `json:"access_key"`
-			Secret    string `json:"secret"`
-			Bucket    string `json:"bucket"`
-		}
-		if err := readJSON(r, &req); err != nil {
-			fail(w, err)
-			return
-		}
-		generated := false
-		if req.Secret == "" {
-			raw := make([]byte, 24)
-			rand.Read(raw)
-			req.Secret = hex.EncodeToString(raw)
-			generated = true
-		}
-		if err := n.Store().CreateCred(r.Context(), req.AccessKey, req.Secret, req.Bucket); err != nil {
-			fail(w, err)
-			return
-		}
-		resp := map[string]any{"access_key": req.AccessKey, "bucket": req.Bucket}
-		if generated {
-			resp["secret"] = req.Secret // 仅此一次返回
-		}
-		writeJSON(w, 200, resp)
-	}
-}
-
-func handleRotateCred(n *node.Node) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ak := r.PathValue("ak")
-		creds, err := n.Store().ListCreds(r.Context())
-		if err != nil {
-			fail(w, err)
-			return
-		}
-		var bucket string
-		for _, c := range creds {
-			if c.AccessKey == ak {
-				bucket = c.Bucket
-			}
-		}
-		if bucket == "" {
-			fail(w, fmt.Errorf("%w: access key", errs.ErrKeyNotFound))
-			return
-		}
-		raw := make([]byte, 24)
-		rand.Read(raw)
-		secret := hex.EncodeToString(raw)
-		if err := n.Store().CreateCred(r.Context(), ak, secret, bucket); err != nil {
-			fail(w, err)
-			return
-		}
-		writeJSON(w, 200, map[string]any{"access_key": ak, "secret": secret}) // 仅此一次返回
-	}
-}
-
-func handleDeleteCred(n *node.Node) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if err := n.Store().DeleteCred(r.Context(), r.PathValue("ak")); err != nil {
-			fail(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		writeJSON(w, 200, map[string]any{
+			"bucket": cred.Bucket, "access_key": cred.AccessKey, "secret": cred.Secret, // 仅此一次
+		})
 	}
 }
 

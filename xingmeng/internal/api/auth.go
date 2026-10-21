@@ -83,6 +83,7 @@ func tokenEqual(a, b string) bool {
 }
 
 // auth 双轨中间件：X-Xm-Session 有效会话或 X-Xm-Token 匹配 admin token。
+// 失败带固定延迟（S-15：与 adminAuth 一致，缓解在线爆破）。
 func auth(adminToken string, sess *sessionStore, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if tok := r.Header.Get("X-Xm-Session"); tok != "" {
@@ -90,6 +91,7 @@ func auth(adminToken string, sess *sessionStore, next http.Handler) http.Handler
 				next.ServeHTTP(w, r)
 				return
 			}
+			time.Sleep(250 * time.Millisecond)
 			writeJSON(w, 401, map[string]any{"error": "session expired or invalid"})
 			return
 		}
@@ -97,6 +99,7 @@ func auth(adminToken string, sess *sessionStore, next http.Handler) http.Handler
 			next.ServeHTTP(w, r)
 			return
 		}
+		time.Sleep(250 * time.Millisecond)
 		writeJSON(w, 401, map[string]any{"error": "bad or missing admin token"})
 	})
 }

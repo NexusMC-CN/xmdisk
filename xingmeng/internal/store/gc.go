@@ -72,11 +72,11 @@ func (s *Store) RunGCOnce(ctx context.Context) (*GCResult, error) {
 	}
 	res.MarkSeq = seq
 
-	minAck, hasSlaves, err := s.meta.MinSlaveAck(ctx)
+	minAck, hasActive, err := s.meta.MinActiveSlaveAck(ctx, time.Now().Add(-s.cfg.SlaveActiveWindow).UnixNano())
 	if err != nil {
 		return res, err
 	}
-	res.GateOpen = !hasSlaves || minAck >= prevMark
+	res.GateOpen = !hasActive || minAck >= prevMark
 	if !res.GateOpen {
 		return res, nil
 	}
@@ -86,6 +86,28 @@ func (s *Store) RunGCOnce(ctx context.Context) (*GCResult, error) {
 	}
 	res.Swept, res.Resurrected = swept, resurrected
 	return res, nil
+}
+
+// maybeTruncateOplog 按 docs/03 截断策略删旧日志（99-D026）：只有当存在
+// 活跃从节点（活跃窗口内有心跳）时，才可删除"全部活跃从节点已 ack 且早于
+// 保留期"的前缀；无活跃从节点不截断（无从节点 ack 则不截断——新从节点
+// 依赖快照重建，此处保守留日志排障与追平余量）。
+func (s *Store) maybeTruncateOplog(ctx context.Context) (int64, error) {
+	minAck, hasActive, err := s.meta.MinActiveSlaveAck(ctx, time.Now().Add(-s.cfg.SlaveActiveWindow).UnixNano())
+	if err != nil || !hasActive {
+		return 0, err
+	}
+	before, err := s.meta.MaxSeqBeforeTs(ctx, time.Now().Add(-s.cfg.OplogRetention).UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	if before <= 0 || before > minAck {
+		before = minAck
+	}
+	if before <= 0 {
+		return 0, nil
+	}
+	return s.meta.TruncateOplog(ctx, before+1) // 删 seq < before+1，即含 before 自身
 }
 
 // StartGC 启动后台标记-清扫循环，ctx 取消即停（main 接管生命周期）。
@@ -102,6 +124,12 @@ func (s *Store) StartGC(ctx context.Context) {
 				if err != nil {
 					slog.Error("gc run failed", "err", err)
 					continue
+				}
+				removed, terr := s.maybeTruncateOplog(ctx)
+				if terr != nil {
+					slog.Error("oplog truncate failed", "err", terr)
+				} else if removed > 0 {
+					slog.Info("oplog truncated", "removedOps", removed)
 				}
 				slog.Info("gc run",
 					"scanned", res.EntriesScanned,
