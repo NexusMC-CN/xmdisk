@@ -18,6 +18,8 @@ func Router(st *store.Store) http.Handler {
 	ls := xwebdav.NewMemLS() // 进程内锁（Office 类客户端需要）
 	var mu sync.Mutex
 	handlers := map[string]*xwebdav.Handler{}
+	// timingDummySecret：AK 未命中时的等长替身（见认证处注释）
+	const timingDummySecret = "timing-equalizer-secret-0123456789abcdef"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rest := r.URL.Path[len("/dav/"):]
 		bucket, _, _ := cutPath(rest)
@@ -26,10 +28,14 @@ func Router(st *store.Store) http.Handler {
 			return
 		}
 		user, pass, ok := r.BasicAuth()
+		// AK 未命中也走一次等长比较：认证失败路径与成功路径耗时一致，防计时枚举有效 AK
 		cred, err := st.LookupCred(r.Context(), user)
-		if !ok || err != nil ||
-			cred.Bucket != bucket ||
-			subtle.ConstantTimeCompare([]byte(cred.Secret), []byte(pass)) != 1 {
+		secret, bound := timingDummySecret, ""
+		if err == nil {
+			secret, bound = cred.Secret, cred.Bucket
+		}
+		if !ok || bound != bucket ||
+			subtle.ConstantTimeCompare([]byte(secret), []byte(pass)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="xingmeng"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

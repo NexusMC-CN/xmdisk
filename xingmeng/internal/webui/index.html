@@ -5,26 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>星梦存储 · 节点管理</title>
 <style>
-:root{--bg:#f5f6f8;--card:#fff;--line:#e3e6ea;--tx:#1c2329;--sub:#6b7480;--acc:#2563eb;--ok:#16a34a;--warn:#d97706;--bad:#dc2626}
+:root{--bg:#0f1115;--card:#171a21;--line:#2a2f3a;--tx:#e5e7eb;--sub:#9aa3b2;--acc:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif;background:var(--bg);color:var(--tx)}
-header{display:flex;align-items:center;gap:12px;padding:10px 20px;background:#111827;color:#fff}
+header{display:flex;align-items:center;gap:12px;padding:10px 20px;background:#0a0c10;color:#fff;border-bottom:1px solid var(--line)}
 header h1{font-size:16px;margin:0;font-weight:600}
 header .sp{flex:1}
 .badge{padding:2px 10px;border-radius:999px;font-size:12px;background:#374151}
 .badge.master{background:#1d4ed8}.badge.slave{background:#7c3aed}
-#sess-info{font-size:12px;color:#9ca3af}
-button{font:inherit;padding:5px 14px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer}
+#sess-info{font-size:12px;color:#9aa3b2}
+button{font:inherit;padding:5px 14px;border:1px solid var(--line);border-radius:6px;background:#1f242e;color:var(--tx);cursor:pointer}
 button:hover{border-color:var(--acc);color:var(--acc)}
 button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
 button.primary:hover{opacity:.9;color:#fff}
-button.danger{color:var(--bad);border-color:#f3c1c1}
-button.danger:hover{background:#fef2f2;border-color:var(--bad)}
+button.danger{color:var(--bad);border-color:#5b2626}
+button.danger:hover{background:#2a1414;border-color:var(--bad)}
 button:disabled{opacity:.5;cursor:not-allowed}
-input,select{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
+input,select{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:#11141a;color:var(--tx)}
 main{max-width:1000px;margin:24px auto;padding:0 16px}
 nav{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--line)}
 nav button{border:none;border-radius:6px 6px 0 0;background:none;color:var(--sub);padding:8px 16px}
+nav button:hover{color:var(--tx)}
 nav button.on{color:var(--acc);font-weight:600;box-shadow:inset 0 -2px var(--acc)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin-bottom:16px}
 .card h3{margin:0 0 12px;font-size:14px;color:var(--sub);font-weight:600}
@@ -34,18 +35,20 @@ th{color:var(--sub);font-weight:500}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
 .hint{color:var(--sub);font-size:12px}
 .banner{padding:10px 14px;border-radius:8px;margin-bottom:12px;font-size:13px}
-.banner.warn{background:#fef3c7;border:1px solid #f5d98f;color:#92400e}
-.banner.err{background:#fee2e2;border:1px solid #f3b6b6;color:#991b1b}
-pre{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;font-size:12px;position:relative}
+.banner.warn{background:#33270c;border:1px solid #8a6a1f;color:#fbbf24}
+.banner.err{background:#3b1212;border:1px solid #8f3a3a;color:#fca5a5}
+pre{background:#0a0c10;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;font-size:12px;position:relative;border:1px solid var(--line)}
 .copy{position:absolute;top:6px;right:6px;font-size:12px;padding:2px 10px;background:#334155;color:#e2e8f0;border:none;border-radius:4px}
 .kv{display:grid;grid-template-columns:180px 1fr;gap:4px 12px;font-size:13px}
 .kv b{color:var(--sub);font-weight:500}
-code{background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px}
+code{background:#232833;padding:1px 6px;border-radius:4px;font-size:12px}
 #login{max-width:420px;margin:80px auto}
 #login .card{padding:28px}
 .tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px}
-.tag.ok{background:#dcfce7;color:#166534}.tag.off{background:#f1f5f9;color:#64748b}
+.tag.ok{background:#14351f;color:#4ade80}.tag.off{background:#1f242e;color:#9aa3b2}
+.tag.now{font-size:14px;padding:4px 16px;font-weight:600}
 .muted{color:var(--sub)}
+#toast{border:1px solid var(--line)}
 </style>
 </head>
 <body>
@@ -95,9 +98,9 @@ code{background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px}
   <section id="t-op" style="display:none">
     <div class="card"><h3>数据面模式（serve）</h3>
       <div class="row">
-        <span id="op-serve-now"></span>
-        <button data-mode="off">停服 off</button><button data-mode="ro">只读 ro</button><button data-mode="rw" class="primary">读写 rw</button>
-      </div><p class="hint">仅主节点可调；从节点恒 off。灾备标准动作：promote 后先 ro 冒烟，确认后开 rw。</p></div>
+        <span id="op-serve-now" style="font-size:15px"></span>
+        <button data-mode="off">停服 off</button><button data-mode="ro">只读 ro</button><button data-mode="rw">读写 rw</button>
+      </div><p class="hint">仅主节点可调；从节点恒 off。灾备标准动作：promote 后先 ro 冒烟，确认后开 rw。高亮按钮 = 当前模式，点击其它按钮切换。</p></div>
     <div class="card"><h3>同步（从节点）</h3>
       <div class="row"><span id="op-sync-now"></span> 主节点地址 <input id="op-sync-addr" placeholder="http://master:9003" style="width:220px"> <button id="op-sync-start">启动同步</button> <button id="op-sync-stop">停止同步</button></div>
       <p class="hint">地址留空 = 沿用最近一次生效地址（重启自动恢复，不回落旧配置）。</p></div>
@@ -258,7 +261,9 @@ $("#bk-add").onclick=async()=>{const name=$("#bk-name").value.trim(),q=$("#bk-qu
 // ---- 运维 ----
 function renderOp(){
   const n=LAST.st.node;
-  $("#op-serve-now").innerHTML=`当前：<span class="tag ${n.serve==="rw"?"ok":"off"}">${esc(n.serve)}</span>`;
+  $("#op-serve-now").innerHTML=`当前模式 <span class="tag ${n.serve==="rw"?"ok":"off"} now">${esc(n.serve)}</span>`;
+  // 高亮 = 当前模式（而非固定 rw），避免把蓝色按钮误读为当前状态
+  $$("#t-op [data-mode]").forEach(b=>b.classList.toggle("primary",b.dataset.mode===n.serve));
   $("#op-sync-now").innerHTML=`当前：${n.sync_running?`<span class="tag ok">运行中</span> → ${esc(n.sync_addr||"")}`:'<span class="tag off">未运行</span>'}`;
 }
 $$("#t-op [data-mode]").forEach(b=>b.onclick=async()=>{

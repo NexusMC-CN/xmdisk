@@ -38,6 +38,16 @@ type PartInfo struct {
 	Size int64
 }
 
+// MpUploadTarget 返回会话归属的 (bucket, key)——S3 面校验 uploadId 与
+// 鉴权桶/键一致（uploadId 是纯能力凭证，泄露也不得跨桶/键使用）。
+func (s *Store) MpUploadTarget(ctx context.Context, uploadID string) (bucket, key string, err error) {
+	u, err := s.meta.GetUpload(ctx, uploadID)
+	if err != nil {
+		return "", "", err
+	}
+	return u.Bucket, u.Key, nil
+}
+
 // MpBegin 创建 multipart 会话。会话是本地状态，不复制（99-D010）：
 // 主挂丢在途上传，客户端重试即可；parts 作为普通 blob，
 // 从节点在 Complete 产生的 entry_put 时批量补拉。

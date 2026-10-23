@@ -3,6 +3,7 @@ package s3
 import (
 	"encoding/xml"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"xingmeng/internal/errs"
@@ -78,6 +79,10 @@ type errorXML struct {
 }
 
 func writeXMLError(w http.ResponseWriter, status int, code, msg, resource, reqID string) {
+	if status >= 500 { // 5xx 固定文案（S-06 同款：内部细节只进日志，不回客户端）
+		slog.Error("s3 internal error", "code", code, "detail", msg, "resource", resource, "request_id", reqID)
+		msg = "internal error"
+	}
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)
 	_ = xml.NewEncoder(w).Encode(errorXML{Code: code, Message: msg, Resource: resource, RequestID: reqID})

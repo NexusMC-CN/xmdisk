@@ -197,9 +197,14 @@ func toPrefixXML(res *store.ListResult) []commonPrefixXML {
 }
 
 func (h *Handler) multiDelete(w http.ResponseWriter, r *http.Request, bucket, reqID string) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // XML 体上限 1MB（防无界解码撑内存）
 	var req deleteRequestXML
 	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeXMLError(w, 400, "MalformedXML", err.Error(), bucket, reqID)
+		return
+	}
+	if len(req.Objects) > 1000 { // S3 规范上限
+		writeXMLError(w, 400, "MalformedXML", "at most 1000 objects per request", bucket, reqID)
 		return
 	}
 	resp := deleteResponseXML{Xmlns: xmlNs}
@@ -388,6 +393,12 @@ func (h *Handler) initiateMultipart(w http.ResponseWriter, r *http.Request, buck
 }
 
 func (h *Handler) multipartOp(w http.ResponseWriter, r *http.Request, bucket, key, uploadID, reqID string) {
+	// 会话归属校验：uploadId 必须属于当前鉴权 (bucket, key)，不一致与
+	// 不存在同构 404（uploadId 是能力凭证，防泄露后跨租户/跨键使用）
+	if ub, uk, err := h.store.MpUploadTarget(r.Context(), uploadID); err != nil || ub != bucket || uk != key {
+		writeXMLError(w, 404, "NoSuchUpload", "upload not found for this bucket/key", r.URL.Path, reqID)
+		return
+	}
 	switch r.Method {
 	case http.MethodPut:
 		partNo, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
@@ -404,9 +415,14 @@ func (h *Handler) multipartOp(w http.ResponseWriter, r *http.Request, bucket, ke
 		w.Header().Set("ETag", quoteETag(etag))
 		w.WriteHeader(http.StatusOK)
 	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // XML 体上限 1MB
 		var req completeMultipartRequestXML
 		if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeXMLError(w, 400, "MalformedXML", err.Error(), r.URL.Path, reqID)
+			return
+		}
+		if len(req.Parts) > 10000 { // S3 规范上限
+			writeXMLError(w, 400, "InvalidArgument", "at most 10000 parts", r.URL.Path, reqID)
 			return
 		}
 		refs := make([]store.PartRef, len(req.Parts))
@@ -537,12 +553,18 @@ func parseRange(spec string, size int64) *store.Range {
 	if err != nil || start < 0 {
 		return nil
 	}
+	if start >= size {
+		return nil // 交给 store 判 416（语义不可满足）
+	}
 	if b == "" {
 		return &store.Range{Start: start, Length: -1}
 	}
 	end, err := strconv.ParseInt(b, 10, 64)
 	if err != nil || end < start {
 		return nil
+	}
+	if end >= size { // 钳到末尾：防 MaxInt64 端点溢出出负长度
+		end = size - 1
 	}
 	return &store.Range{Start: start, Length: end - start + 1}
 }

@@ -88,6 +88,7 @@ docker exec $M curl -s -o /dev/null -w "%{http_code}" localhost:9004/$BKT/hello.
 docker exec $M curl -s -o /dev/null -w "%{http_code}" localhost:9004/$PUBB/none.txt | grep -q 404 || fail "missing object must 404"
 docker exec $M curl -s -o /dev/null -w "%{http_code}" -H "Range: bytes=0-2" localhost:9004/$PUBB/hello.txt | grep -q 206 || fail "range must 206"
 if docker exec $M sh -c "curl -sI localhost:9004/$PUBB/hello.txt | grep -i cache-control"; then fail "must NOT emit cache-control"; fi
+docker exec $M sh -c "curl -sI localhost:9004/$PUBB/hello.txt | grep -qi 'x-content-type-options: nosniff'" || fail "nosniff header missing"
 
 say "5. 起从节点（env：XM_ROLE=slave + XM_MASTER_ADDR；repl token 同值）并等待追平"
 docker run -d --name $S --network $NET \

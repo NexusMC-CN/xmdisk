@@ -72,6 +72,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func readJSON(r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20) // 请求体上限 1MB（admin 面防无界解码）
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		return fmt.Errorf("%w: %v", errs.ErrInvalidArgument, err)
 	}

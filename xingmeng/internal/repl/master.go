@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -51,6 +52,12 @@ func writeErr(w http.ResponseWriter, status int, msg string, resnapshot bool) {
 	_ = json.NewEncoder(w).Encode(errorResp{Error: msg, Resnapshot: resnapshot})
 }
 
+// writeInternal 500 固定文案（内部细节只进日志，不回对端）。
+func writeInternal(w http.ResponseWriter, where string, err error) {
+	slog.Error("repl internal error", "where", where, "err", err.Error())
+	writeErr(w, http.StatusInternalServerError, "internal error", false)
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -71,7 +78,7 @@ func (m *Master) handleOplog(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	minSeq, hasAny, err := m.store.MinSeq(ctx)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error(), false)
+		writeInternal(w, "oplog/min_seq", err)
 		return
 	}
 	if hasAny && after+1 < minSeq {
@@ -81,7 +88,7 @@ func (m *Master) handleOplog(w http.ResponseWriter, r *http.Request) {
 	}
 	ops, err := m.store.Ops(ctx, after, limit)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error(), false)
+		writeInternal(w, "oplog/fetch", err)
 		return
 	}
 	out := make([]wireOp, len(ops))
@@ -95,12 +102,12 @@ func (m *Master) handleOplog(w http.ResponseWriter, r *http.Request) {
 func (m *Master) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	path, seq, err := m.store.Snapshot(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error(), false)
+		writeInternal(w, "snapshot/create", err)
 		return
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error(), false)
+		writeInternal(w, "snapshot/open", err)
 		return
 	}
 	defer f.Close()
@@ -137,7 +144,7 @@ func (m *Master) handleAck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := m.store.AckSlave(r.Context(), req.SlaveID, req.LastSeq, time.Now().UnixNano()); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error(), false)
+		writeInternal(w, "ack", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -153,17 +160,17 @@ func (m *Master) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	if err := m.store.RegisterSlave(ctx, req.SlaveID, time.Now().UnixNano()); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error(), false)
+		writeInternal(w, "register", err)
 		return
 	}
 	epoch, err := m.store.MaxEpoch(ctx)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error(), false)
+		writeInternal(w, "register/epoch", err)
 		return
 	}
 	last, err := m.store.LastSeq(ctx)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error(), false)
+		writeInternal(w, "register/last_seq", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, registerResp{Epoch: epoch, LastSeq: last})

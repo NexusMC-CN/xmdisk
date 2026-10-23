@@ -16,6 +16,9 @@ func Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Frame-Options", "DENY")
+		// CSP 兜底：默认仅同源，脚本/样式因单文件内联放开（全部插值经 esc() 转义）
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		data, err := files.ReadFile("index.html")
 		if err != nil {

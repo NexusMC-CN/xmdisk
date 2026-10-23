@@ -13,12 +13,16 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
 	"xingmeng/internal/store"
 )
+
+// timingDummySecret：AK 未命中时的等长替身（认证失败与成功路径耗时一致）
+const timingDummySecret = "timing-equalizer-secret-0123456789abcdef"
 
 // Server 是 SSH/SFTP 服务端：密码认证走凭据表（AK/SK），认证成功即把
 // 该凭据绑定的桶注入连接权限，SFTP 会话以此为根目录（99-D021）。
@@ -36,9 +40,13 @@ func NewServer(st *store.Store, dataDir string) (*Server, error) {
 	cfg := &ssh.ServerConfig{
 		MaxAuthTries: 3,
 		PasswordCallback: func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			// AK 未命中也走一次等长比较：与 WebDAV 同款防计时枚举
 			cred, err := st.LookupCred(context.Background(), meta.User())
-			if err != nil ||
-				subtle.ConstantTimeCompare([]byte(cred.Secret), password) != 1 {
+			secret := timingDummySecret
+			if err == nil {
+				secret = cred.Secret
+			}
+			if err != nil || subtle.ConstantTimeCompare([]byte(secret), password) != 1 {
 				return nil, errors.New("sftp auth failed")
 			}
 			return &ssh.Permissions{Extensions: map[string]string{"bucket": cred.Bucket}}, nil
@@ -48,13 +56,16 @@ func NewServer(st *store.Store, dataDir string) (*Server, error) {
 	return &Server{store: st, cfg: cfg}, nil
 }
 
-// ServeConn 处理一条 SSH 连接：session 通道 + sftp 子系统。
+// ServeConn 处理一条 SSH 连接：握手带 30s 截止（防慢握手吊住 goroutine），
+// 认证成功后清除截止；session 通道 + sftp 子系统。
 func (s *Server) ServeConn(nc net.Conn) {
+	nc.SetDeadline(time.Now().Add(30 * time.Second))
 	sconn, chans, reqs, err := ssh.NewServerConn(nc, s.cfg)
 	if err != nil {
 		nc.Close()
 		return
 	}
+	nc.SetDeadline(time.Time{})
 	defer sconn.Close()
 	go ssh.DiscardRequests(reqs)
 	bucket := sconn.Permissions.Extensions["bucket"]

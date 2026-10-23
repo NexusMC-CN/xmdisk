@@ -102,7 +102,9 @@ func main() {
 			for {
 				conn, err := sshLn.Accept()
 				if err != nil {
-					return
+					slog.Error("ssh accept failed; retrying in 1s", "err", err) // 不再静默退出监听
+					time.Sleep(time.Second)
+					continue
 				}
 				n.SFTPConn(conn)
 			}
@@ -135,7 +137,8 @@ func main() {
 }
 
 func listen(addr string, h http.Handler, name string) *http.Server {
-	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	// IdleTimeout 收掉慢速 keepalive 连接（读头 10s + 空闲 120s；正文不设超时——大上传依赖）
+	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 }
 
 func fatal(format string, args ...any) {

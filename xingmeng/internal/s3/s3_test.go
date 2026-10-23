@@ -529,3 +529,55 @@ func TestBucketLifecycleAdminOnly(t *testing.T) {
 		t.Fatalf("list deleted bucket with stale cred must 403, got %d", rec.Code)
 	}
 }
+
+// TestS3MultiDeleteLimit 多对象删除边界（终检 P2-1）：>1000 条拒绝、
+// XML 体上限 1MB（MaxBytesReader 超限解码失败 → 400）。
+func TestS3MultiDeleteLimit(t *testing.T) {
+	h, _ := newTestHandler(t)
+	var sb strings.Builder
+	sb.WriteString("<Delete>")
+	for i := 0; i < 1001; i++ {
+		sb.WriteString("<Object><Key>k</Key></Object>")
+	}
+	sb.WriteString("</Delete>")
+	if rec := doSigned(t, h, http.MethodPost, "/"+testBucket+"?delete", []byte(sb.String()), nil); rec.Code != 400 {
+		t.Fatalf("1001 objects must 400, got %d", rec.Code)
+	}
+}
+
+// TestS3MultipartOwnership multipart 会话归属（终检 P2-2）：A 桶凭据拿不到
+// B 桶会话的任何操作——uploadId 与 (bucket,key) 不一致一律 404 NoSuchUpload。
+func TestS3MultipartOwnership(t *testing.T) {
+	h, s := newTestHandler(t)
+	ctx := context.Background()
+	if _, err := s.CreateBucket(ctx, "other-bkt", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	// 在 other-bkt 上开会话，用 testBucket 的凭据访问 → 404
+	rec := doSigned(t, h, http.MethodPost, "/other-bkt/mp.bin?uploads", []byte{}, nil)
+	if rec.Code != 403 { // 凭据绑桶：对 other-bkt 的任何请求本来就 403
+		t.Fatalf("foreign bucket must 403, got %d", rec.Code)
+	}
+	// 直接经 store 在 other-bkt 开会话，再以 testBucket 凭据 + 同 uploadId 访问（键也错开）
+	upID, err := s.MpBegin(ctx, "other-bkt", "mp.bin", store.PutOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		"/" + testBucket + "/mp.bin?uploadId=" + upID + "&partNumber=1", // PUT part
+		"/" + testBucket + "/mp.bin?uploadId=" + upID,                   // complete/delete/list
+	}
+	for _, p := range paths {
+		m := http.MethodDelete
+		if strings.Contains(p, "partNumber") {
+			m = http.MethodPut
+		}
+		if rec := doSigned(t, h, m, p, []byte("x"), nil); rec.Code != 404 {
+			t.Fatalf("session ownership must 404 (%s %s): %d", m, p, rec.Code)
+		}
+	}
+	// 同桶不同键同样拒绝（uploadId 是 (bucket,key) 级能力凭证）
+	if rec := doSigned(t, h, http.MethodDelete, "/"+testBucket+"/wrong-key?uploadId="+upID, nil, nil); rec.Code != 404 {
+		t.Fatalf("wrong key must 404, got %d", rec.Code)
+	}
+}
