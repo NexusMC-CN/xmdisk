@@ -356,6 +356,41 @@ func (s *Store) RegisterSlave(ctx context.Context, id string, nowNs int64) error
 	return s.meta.RegisterSlave(ctx, id, nowNs)
 }
 
+// Slave 一个已注册从节点的观察视图（GET /slaves 与 xm_slave_* 指标）。
+type Slave struct {
+	ID         string
+	LastAcked  int64  // 从节点已应用的 oplog seq
+	Lag        int64  // 本节点 last_seq - LastAcked（≥0）
+	Epoch      uint32 // 从节点最近 ack 携带的 epoch
+	LastSeenNs int64  // 最近一次注册/ack 时间（活跃窗口判定源）
+	Active     bool   // last_seen 在活跃窗口内（窗口外=僵尸注册，不计门控）
+}
+
+// Slaves 返回注册从节点观察视图（主节点面；从节点本地表无意义）。
+func (s *Store) Slaves(ctx context.Context) ([]Slave, error) {
+	infos, err := s.meta.ListSlaves(ctx)
+	if err != nil {
+		return nil, err
+	}
+	last, err := s.LastSeq(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().Add(-s.cfg.SlaveActiveWindow).UnixNano()
+	out := make([]Slave, 0, len(infos))
+	for _, in := range infos {
+		lag := last - in.LastAcked
+		if lag < 0 {
+			lag = 0
+		}
+		out = append(out, Slave{
+			ID: in.ID, LastAcked: in.LastAcked, Lag: lag,
+			Epoch: in.Epoch, LastSeenNs: in.LastSeenNs, Active: in.LastSeenNs >= cutoff,
+		})
+	}
+	return out, nil
+}
+
 // Ops 返回 seq 大于 after 的 op（admin 排障与测试用）。
 func (s *Store) Ops(ctx context.Context, after int64, limit int) ([]meta.Op, error) {
 	return s.meta.OpsAfter(ctx, after, limit)

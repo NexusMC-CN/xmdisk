@@ -69,6 +69,36 @@ func (d *DB) RegisterSlave(ctx context.Context, id string, nowNs int64) error {
 	return err
 }
 
+// SlaveInfo 一个已注册从节点的进度快照（GET /slaves 与指标输出用）。
+type SlaveInfo struct {
+	ID         string
+	LastAcked  int64
+	Epoch      uint32
+	LastSeenNs int64
+}
+
+// ListSlaves 返回全部注册从节点（按 id 排序）；lag 与活跃判定由上层结合
+// 本节点 seq 与活跃窗口计算（集群实测 F3：runbook A4/B2 的验证入口）。
+func (d *DB) ListSlaves(ctx context.Context) ([]SlaveInfo, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT id, last_acked, epoch, last_seen_ns FROM slaves ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SlaveInfo
+	for rows.Next() {
+		var s SlaveInfo
+		var epoch int64
+		if err := rows.Scan(&s.ID, &s.LastAcked, &epoch, &s.LastSeenNs); err != nil {
+			return nil, err
+		}
+		s.Epoch = uint32(epoch)
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // ---- GC 状态（schema v2）----
 
 // GCMarkSeq 返回上次完成标记时的 oplog seq。

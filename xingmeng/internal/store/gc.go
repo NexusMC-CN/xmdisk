@@ -20,6 +20,13 @@ type GCResult struct {
 	Resurrected    int64
 	GateOpen       bool // 从节点 ack 门控是否放行清扫
 	MarkSeq        int64
+	TruncatedOps   int64 // 本轮联动的 oplog 截断条数（0=无活跃从/无到期前缀；集群实测 F4）
+}
+
+// TruncateOplogNow 立即执行一轮按策略的 oplog 截断（POST /gc 联动；
+// 与后台 GC 循环同一实现，99-D026——手动 GC 不必等 1h ticker）。
+func (s *Store) TruncateOplogNow(ctx context.Context) (int64, error) {
+	return s.maybeTruncateOplog(ctx)
 }
 
 // RunGCOnce 执行一轮完整的标记-清扫（99-D006）：

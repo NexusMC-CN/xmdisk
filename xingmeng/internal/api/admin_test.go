@@ -63,6 +63,23 @@ func adminCall(t *testing.T, base, method, path string, body any) (int, map[stri
 	return resp.StatusCode, out
 }
 
+// rawCall 返回状态码与原始响应体（/metrics 文本面用）。
+func rawCall(t *testing.T, base, method, path string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, base+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Xm-Token", admTok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
+}
+
 // waitFor 轮询直到条件成立或超时。
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
 	t.Helper()
@@ -656,5 +673,85 @@ func TestSyncAddrStickyAcrossStopStart(t *testing.T) {
 	}
 	if got := syncAddr(); got != replSrv.URL {
 		t.Fatalf("sync_addr must stay sticky across stop/start, got %q", got)
+	}
+}
+
+// TestSlavesGCTruncateMetrics 集群实测 F3/F4/F5 回归：GET /slaves 观察
+// （id/ack/lag/活跃，runbook A4/B2 验证入口）、POST /gc 联动 oplog 截断
+// （水位线保留最新一条）、指标含 xm_oplog_first_seq 与 xm_slave_*。
+func TestSlavesGCTruncateMetrics(t *testing.T) {
+	ctx := context.Background()
+	kek := []byte("slaves-kek")
+
+	cfg := testConfig(t, "master", t.TempDir()+"/m", "")
+	cfg.Replication.OplogRetention = time.Nanosecond // 立即可截断（联动验证）
+	master, err := node.Start(ctx, cfg, kek)
+	if err != nil {
+		t.Fatalf("start master: %v", err)
+	}
+	defer master.Close()
+	adminSrv := httptest.NewServer(AdminRouter(master, RouterConfig{AdminToken: admTok}))
+	defer adminSrv.Close()
+	replSrv := httptest.NewServer(master.ReplHandler())
+	defer replSrv.Close()
+
+	if code, out := adminCall(t, adminSrv.URL, "POST", "/buckets", map[string]any{"name": "bkt"}); code != 200 {
+		t.Fatalf("create bucket: %d %v", code, out)
+	}
+	for _, k := range []string{"a", "b"} {
+		if _, err := master.Store().Put(ctx, "bkt", k, strings.NewReader("data-"+k), store.PutOptions{}); err != nil {
+			t.Fatalf("put %s: %v", k, err)
+		}
+	}
+
+	slave, err := node.Start(ctx, testConfig(t, "slave", t.TempDir()+"/s", replSrv.URL), kek)
+	if err != nil {
+		t.Fatalf("start slave: %v", err)
+	}
+	defer slave.Close()
+	slaveAdmin := httptest.NewServer(AdminRouter(slave, RouterConfig{AdminToken: admTok}))
+	defer slaveAdmin.Close()
+
+	last, _ := master.Store().LastSeq(ctx)
+	waitFor(t, 10*time.Second, func() bool {
+		l, _ := slave.Store().LastSeq(ctx)
+		return l >= last
+	}, "slave catch up")
+
+	// F3：主节点 /slaves 逐台出现且 lag=0；从节点侧 masterOnly 拒绝
+	code, out := adminCall(t, adminSrv.URL, "GET", "/slaves", nil)
+	if code != 200 {
+		t.Fatalf("GET /slaves: %d %v", code, out)
+	}
+	rows, _ := out["slaves"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 registered slave, got %v", rows)
+	}
+	row := rows[0].(map[string]any)
+	if row["ID"] != "node-slave" || row["LastAcked"] != float64(last) || row["Lag"] != float64(0) || row["Active"] != true {
+		t.Fatalf("slave view wrong: %v (want id=node-slave acked=%d lag=0 active)", row, last)
+	}
+	if code, _ := adminCall(t, slaveAdmin.URL, "GET", "/slaves", nil); code != http.StatusServiceUnavailable {
+		t.Fatalf("slave node must reject /slaves (not master), got %d", code)
+	}
+
+	// F4：POST /gc 联动截断——全 ack + retention 已过，恰好删到只剩水位线（最新一条）
+	code, out = adminCall(t, adminSrv.URL, "POST", "/gc", nil)
+	if code != 200 {
+		t.Fatalf("POST /gc: %d %v", code, out)
+	}
+	if tt, ok := out["TruncatedOps"]; !ok || tt != float64(last-1) {
+		t.Fatalf("gc must truncate acked prefix to watermark: TruncatedOps=%v want %d", out["TruncatedOps"], last-1)
+	}
+	if first, hasAny, _ := master.Store().MinSeq(ctx); !hasAny || first != last {
+		t.Fatalf("oplog must retain newest op as watermark: first=%d hasAny=%v want %d", first, hasAny, last)
+	}
+
+	// F5：指标含首序号与从节点进度
+	code, body := rawCall(t, adminSrv.URL, "GET", "/metrics")
+	if code != 200 || !strings.Contains(body, "xm_oplog_first_seq") ||
+		!strings.Contains(body, `xm_slave_acked{slave="node-slave"}`) ||
+		!strings.Contains(body, `xm_slave_lag{slave="node-slave"} 0`) {
+		t.Fatalf("metrics missing first_seq/slave gauges: %d %q", code, body)
 	}
 }

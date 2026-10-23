@@ -103,6 +103,10 @@ for i in $(seq 1 60); do
 done
 [ "$ML" = "$SL" ] && [ "$ML" != "0" ] || fail "slave catch up (master=$ML slave=$SL)"
 docker exec $S curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/verify -d '{"limit":100}' | grep -q '"Failures":null\|"failures":null\|"failures":\[\]' || fail "slave verify"
+# 主节点从节点观察面（集群实测 F3）：lag=0 可见
+docker exec $M curl -s -H "X-Xm-Token: $ADM" localhost:9002/slaves | grep -q '"Lag":0' || fail "master /slaves lag=0"
+# 手动 GC 联动截断（F4）：响应带 TruncatedOps 字段（默认 24h retention 下为 0，字段必须在）
+docker exec $M curl -s -H "X-Xm-Token: $ADM" -XPOST localhost:9002/gc -d '{}' | grep -q 'TruncatedOps' || fail "gc truncate field"
 
 say "6. 灾备切换（runbook A0-A6）：主离线 → 停同步 → promote → 开 rw"
 docker stop $M >/dev/null || fail "kill master"

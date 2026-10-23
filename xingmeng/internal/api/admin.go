@@ -44,6 +44,8 @@ func AdminRouter(n *node.Node, rc RouterConfig) http.Handler {
 	mux.HandleFunc("POST /snapshot", masterOnly(n, audited(handleSnapshot(n))))
 	mux.HandleFunc("POST /gc", audited(handleGC(n)))
 	mux.HandleFunc("POST /verify", handleVerify(n))
+	// 从节点观察面（runbook A4/B2 验证入口；从节点本地注册表无意义，仅主节点开放）
+	mux.HandleFunc("GET /slaves", masterOnly(n, handleSlaves(n)))
 	// 桶=租户=一把钥匙（99-D025）：建桶即发钥、删桶级联删钥、rotate 挂桶路径；
 	// 独立的凭据增删接口已移除（GET /creds 并入 GET /buckets）。
 	mux.HandleFunc("GET /buckets", handleListBuckets(n))
@@ -199,6 +201,29 @@ xm_repl_listening %d
 			out += fmt.Sprintf("xm_bucket_used_bytes{bucket=%q} %d\nxm_bucket_objects{bucket=%q} %d\nxm_bucket_pending_bytes{bucket=%q} %d\nxm_bucket_public{bucket=%q} %d\n",
 				b.Name, b.Used, b.Name, b.Objects, b.Name, b.Pending, b.Name, boolToInt(b.Public))
 		}
+		// oplog 首序号（截断观测；last_seq 是尾端，first_seq 才能看出日志在收缩，
+		// 集群实测 F5）。日志为空时不输出。
+		if first, hasAny, err := n.Store().MinSeq(r.Context()); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		} else if hasAny {
+			out += fmt.Sprintf("# HELP xm_oplog_first_seq Oldest retained oplog seq (truncation observability)\n# TYPE xm_oplog_first_seq gauge\nxm_oplog_first_seq %d\n", first)
+		}
+		// 从节点复制进度（主节点注册表；active=活跃窗口内有心跳）
+		slaves, err := n.Store().Slaves(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		if len(slaves) > 0 {
+			out += "# HELP xm_slave_acked Last acked oplog seq per registered slave\n# TYPE xm_slave_acked gauge\n" +
+				"# HELP xm_slave_lag Replication lag in ops (master last_seq - acked)\n# TYPE xm_slave_lag gauge\n" +
+				"# HELP xm_slave_active 1 if slave seen within active window\n# TYPE xm_slave_active gauge\n"
+		}
+		for _, s := range slaves {
+			out += fmt.Sprintf("xm_slave_acked{slave=%q} %d\nxm_slave_lag{slave=%q} %d\nxm_slave_active{slave=%q} %d\n",
+				s.ID, s.LastAcked, s.ID, s.Lag, s.ID, boolToInt(s.Active))
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		w.Write([]byte(out))
 	}
@@ -286,7 +311,26 @@ func handleGC(n *node.Node) http.HandlerFunc {
 			fail(w, err)
 			return
 		}
+		// 手动 GC 联动 oplog 截断（集群实测 F4）：与后台循环同一策略，
+		// 运维不必等 ticker——日志收缩也是 GC 语义的一部分。
+		if res.TruncatedOps, err = n.Store().TruncateOplogNow(r.Context()); err != nil {
+			fail(w, err)
+			return
+		}
 		writeJSON(w, 200, res)
+	}
+}
+
+// handleSlaves 输出注册从节点观察视图（id/ack/lag/活跃；集群实测 F3，
+// docs/03 runbook A4/B2 的 lag→0 验证步骤依赖此端点）。
+func handleSlaves(n *node.Node) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		slaves, err := n.Store().Slaves(r.Context())
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"slaves": slaves})
 	}
 }
 
