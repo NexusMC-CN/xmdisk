@@ -332,10 +332,13 @@ func (n *Node) SyncStart(addrOverride string) error {
 }
 
 // SyncStop 停止同步并等待循环退出（promote 护栏依赖"确实已停"）。
+// syncAddr 不清：运行态地址在 stop/start 循环与重启间都保持粘性（99-D023
+// "不回落旧配置"；实测曾因清空导致 start 不带地址回落 env 旧主并覆盖重指
+// 结果，集群实测 2026-10-23）。需换主地址时显式传 master_addr 覆盖。
 func (n *Node) SyncStop() error {
 	n.mu.Lock()
 	cancel, done := n.syncCancel, n.syncDone
-	n.syncCancel, n.syncDone, n.syncAddr = nil, nil, ""
+	n.syncCancel, n.syncDone = nil, nil
 	n.mu.Unlock()
 	if cancel == nil {
 		return fmt.Errorf("%w: sync not running", errs.ErrInvalidArgument)

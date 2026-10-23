@@ -273,10 +273,16 @@ func TestOplogTruncationAndActiveWindow(t *testing.T) {
 	if err != nil || n == 0 {
 		t.Fatalf("active acked slave must allow truncation: n=%d err=%v", n, err)
 	}
+	// 水位线保护：最新一条 op 必须保留——seq 分配器是 oplog MAX(seq)+1，
+	// 全量清空会让 seq 回卷、ack 在前的从节点永远拉不到新 op（实测 P1）
 	opsLeft, _ := s.Ops(ctx, 0, 1000)
-	for _, op := range opsLeft {
-		if op.Seq <= last {
-			t.Fatalf("acked prefix must be truncated, found op %d", op.Seq)
-		}
+	if len(opsLeft) != 1 || opsLeft[0].Seq != last {
+		t.Fatalf("newest op must be retained as seq watermark: want [seq=%d], got %+v", last, opsLeft)
+	}
+	// 截断后写入：seq 必须从 max+1 续号，不得回卷到 1
+	mustPut(t, s, "bkt", "k3", randBytes(t, 8<<10), PutOptions{})
+	cur, _ := s.LastSeq(ctx)
+	if cur != last+1 {
+		t.Fatalf("seq must continue after full-ack truncation: last=%d cur=%d", last, cur)
 	}
 }

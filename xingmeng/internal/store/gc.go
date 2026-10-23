@@ -92,10 +92,17 @@ func (s *Store) RunGCOnce(ctx context.Context) (*GCResult, error) {
 // 活跃从节点（活跃窗口内有心跳）时，才可删除"全部活跃从节点已 ack 且早于
 // 保留期"的前缀；无活跃从节点不截断（无从节点 ack 则不截断——新从节点
 // 依赖快照重建，此处保守留日志排障与追平余量）。
+// 最新一条 op 永远保留：seq 分配器是 oplog 的 MAX(seq)+1，全量清空会让
+// seq 回卷到 1，ack 水位在前的从节点将永远拉不到回卷后的新 op（实测
+// P1，集群实测 2026-10-23）。
 func (s *Store) maybeTruncateOplog(ctx context.Context) (int64, error) {
 	minAck, hasActive, err := s.meta.MinActiveSlaveAck(ctx, time.Now().Add(-s.cfg.SlaveActiveWindow).UnixNano())
 	if err != nil || !hasActive {
 		return 0, err
+	}
+	maxSeq, err := s.meta.LastSeq(ctx)
+	if err != nil || maxSeq <= 1 {
+		return 0, err // 空日志或仅一条（即最新）：无前缀可删
 	}
 	before, err := s.meta.MaxSeqBeforeTs(ctx, time.Now().Add(-s.cfg.OplogRetention).UnixNano())
 	if err != nil {
@@ -103,6 +110,9 @@ func (s *Store) maybeTruncateOplog(ctx context.Context) (int64, error) {
 	}
 	if before <= 0 || before > minAck {
 		before = minAck
+	}
+	if before > maxSeq-1 {
+		before = maxSeq - 1 // 水位线保护：至少留下最新一条 op
 	}
 	if before <= 0 {
 		return 0, nil

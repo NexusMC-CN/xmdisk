@@ -594,3 +594,67 @@ func TestBucketCredLifecycle(t *testing.T) {
 		t.Fatalf("rotate on missing bucket must 400, got %d", code)
 	}
 }
+
+// TestSyncAddrStickyAcrossStopStart stop/start 循环不得丢失运行态主地址
+// （99-D023"不回落旧配置"；实测 P2：SyncStop 曾清空 syncAddr，导致 start
+// 不带地址时回落 env 出生值旧主，并把回落的地址持久化覆盖重指结果——
+// 灾备 A4 重指后一次普通的"停同步再开"就会静默指回已 fence 的旧主）。
+func TestSyncAddrStickyAcrossStopStart(t *testing.T) {
+	ctx := context.Background()
+	kek := []byte("sticky-kek")
+
+	master, err := node.Start(ctx, testConfig(t, "master", t.TempDir()+"/m", ""), kek)
+	if err != nil {
+		t.Fatalf("start master: %v", err)
+	}
+	defer master.Close()
+	masterAdmin := httptest.NewServer(AdminRouter(master, RouterConfig{AdminToken: admTok}))
+	defer masterAdmin.Close()
+	if code, out := adminCall(t, masterAdmin.URL, "POST", "/buckets", map[string]any{"name": "bkt"}); code != 200 {
+		t.Fatalf("create bucket: %d %v", code, out)
+	}
+	replSrv := httptest.NewServer(master.ReplHandler())
+	defer replSrv.Close()
+
+	// 出生指向"错误"的主地址（模拟 env 旧主）
+	badSrv := httptest.NewServer(http.NotFoundHandler())
+	defer badSrv.Close()
+	slave, err := node.Start(ctx, testConfig(t, "slave", t.TempDir()+"/s", badSrv.URL), kek)
+	if err != nil {
+		t.Fatalf("start slave: %v", err)
+	}
+	defer slave.Close()
+	slaveAdmin := httptest.NewServer(AdminRouter(slave, RouterConfig{AdminToken: admTok}))
+	defer slaveAdmin.Close()
+	base := slaveAdmin.URL
+
+	stop := func() {
+		if code, out := adminCall(t, base, "POST", "/sync", map[string]any{"action": "stop"}); code != 200 {
+			t.Fatalf("sync stop: %d %v", code, out)
+		}
+	}
+	syncAddr := func() string {
+		code, out := adminCall(t, base, "GET", "/status", nil)
+		if code != 200 {
+			t.Fatalf("status: %d", code)
+		}
+		return out["node"].(map[string]any)["sync_addr"].(string)
+	}
+
+	// A4 重指：stop → start(显式新主) → 地址生效
+	stop()
+	if code, out := adminCall(t, base, "POST", "/sync", map[string]any{"action": "start", "master_addr": replSrv.URL}); code != 200 {
+		t.Fatalf("sync start with addr: %d %v", code, out)
+	}
+	if got := syncAddr(); got != replSrv.URL {
+		t.Fatalf("re-point must take effect: got %q", got)
+	}
+	// 回归点：stop → start(不带地址) 必须沿用运行态地址，不得回落 env 旧值
+	stop()
+	if code, out := adminCall(t, base, "POST", "/sync", map[string]any{"action": "start"}); code != 200 {
+		t.Fatalf("sync start without addr: %d %v", code, out)
+	}
+	if got := syncAddr(); got != replSrv.URL {
+		t.Fatalf("sync_addr must stay sticky across stop/start, got %q", got)
+	}
+}
