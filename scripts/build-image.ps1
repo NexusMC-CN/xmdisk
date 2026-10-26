@@ -1,33 +1,33 @@
 # xmd official image build script (linux/amd64 only by design).
 #
-# Pipeline: go vet -> cross-compile static linux/amd64 binary -> docker build
-# (alpine wrapper image, no network steps inside the build; see xingmeng/Dockerfile).
+# Build mode (no -Push): go vet -> cross-compile static linux/amd64 binary ->
+# docker build (alpine wrapper image, no network steps inside the build; see
+# xingmeng/Dockerfile). Image name is fixed: defeatedperson/xmdisk.
 #
 # Version policy: manual semver input (vX.Y.Z). The last successfully built
 # version is remembered in var/build/image-version.txt (gitignored). On each
 # run the script shows the last version and suggests the next patch bump.
 # Rebuilding the same tag is allowed but asks for confirmation.
 #
-# Registry: by default the image is local-only ("xmd:<version>" + "xmd:latest").
-# To publish, pass -Registry (e.g. "ghcr.io/defeatedperson") and -Push, after a
-# one-time `docker login <registry>`.
+# Push mode (-Push): no build. Pushes the last built local version tag plus
+# "latest" to Docker Hub (defeatedperson/xmdisk). One-time setup: docker login.
 #
 # Usage:
-#   powershell -File scripts/build-image.ps1                     # prompt for version
-#   powershell -File scripts/build-image.ps1 v0.2.0              # explicit version
+#   powershell -File scripts/build-image.ps1                     # build, prompt for version
+#   powershell -File scripts/build-image.ps1 v0.2.0              # build, explicit version
 #   powershell -File scripts/build-image.ps1 v0.2.0 -Yes         # no confirmations
 #   powershell -File scripts/build-image.ps1 v0.2.0 -RunTests    # go test first
-#   powershell -File scripts/build-image.ps1 v0.2.0 -Push -Registry ghcr.io/defeatedperson
+#   powershell -File scripts/build-image.ps1 -Push               # publish last built to Docker Hub
 
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [string]$Version,          # image tag, e.g. v0.1.0; omit to be prompted
+    [string]$Version,          # build mode: image tag, e.g. v0.1.0; omit to be prompted.
+                               # (ignored in push mode)
 
-    [switch]$Push,             # push <version> and latest tags after build (needs -Registry)
-    [string]$Registry = "",    # registry prefix, e.g. "ghcr.io/defeatedperson"; empty = local only
+    [switch]$Push,             # push mode: publish last built version + latest to Docker Hub
 
-    [switch]$RunTests,         # run full "go test ./..." before building (slower, safer)
+    [switch]$RunTests,         # build mode: run full "go test ./..." before building
     [switch]$Yes               # assume yes for all confirmations (non-interactive use)
 )
 
@@ -62,6 +62,33 @@ if ($last) {
     Write-Info "No previous image build on record; this is the first build."
 }
 
+$Image = "defeatedperson/xmdisk"
+
+# --- push mode: publish the last built version, no build --------------------
+
+if ($Push) {
+    if (-not [string]::IsNullOrWhiteSpace($Version)) {
+        Write-Warn2 "-Push publishes the last built version; version argument '$Version' is ignored."
+    }
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Write-Fail "docker not found in PATH." }
+    $null = & { $ErrorActionPreference = 'Continue'; docker version --format "{{.Server.Version}}" *> $null }
+    if ($LASTEXITCODE -ne 0) { Write-Fail "Docker daemon not reachable (is Docker Desktop running?)." }
+    if (-not $last) { Write-Fail "No image build on record yet; run the build flow first." }
+
+    Write-Info "=== Pushing ${Image}:$last and :latest to Docker Hub ==="
+    $null = & { $ErrorActionPreference = 'Continue'; docker image inspect "${Image}:$last" *> $null }
+    if ($LASTEXITCODE -ne 0) { Write-Fail "Local image ${Image}:$last not found; rebuild it first." }
+
+    docker push "${Image}:$last"
+    if ($LASTEXITCODE -ne 0) { Write-Fail "docker push failed (not logged in? run: docker login)" }
+    docker push "${Image}:latest"
+    if ($LASTEXITCODE -ne 0) { Write-Fail "docker push latest failed." }
+    Write-Ok "=== Done: pushed ${Image}:$last and ${Image}:latest ==="
+    exit 0
+}
+
+# --- build mode: version input ----------------------------------------------
+
 if ([string]::IsNullOrWhiteSpace($Version)) {
     if ($Yes) {
         $Version = $suggest
@@ -89,9 +116,6 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Write-Fail "docke
 # raises NativeCommandError; probe inside a Continue-preference scope.
 $null = & { $ErrorActionPreference = 'Continue'; docker version --format "{{.Server.Version}}" *> $null }
 if ($LASTEXITCODE -ne 0) { Write-Fail "Docker daemon not reachable (is Docker Desktop running?)." }
-
-$Image = "xmd"
-if ($Registry) { $Image = "$Registry/xmd" }
 
 $gitRev = & { $ErrorActionPreference = 'Continue'; git -C $Root rev-parse --short HEAD 2>$null }
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($gitRev)) { $gitRev = "" }
@@ -137,21 +161,6 @@ docker build -f (Join-Path $SrcDir "Dockerfile") @labelArgs `
     -t "${Image}:$Version" -t "${Image}:latest" $SrcDir
 if ($LASTEXITCODE -ne 0) { Write-Fail "docker build failed." }
 
-# --- publish ---------------------------------------------------------------
-
-if ($Push) {
-    if (-not $Registry) {
-        Write-Fail "-Push requires -Registry (e.g. ghcr.io/defeatedperson). One-time setup: docker login <registry>"
-    }
-    Write-Info "--- push ${Image}:$Version ---"
-    docker push "${Image}:$Version"
-    if ($LASTEXITCODE -ne 0) { Write-Fail "docker push failed (not logged in? run: docker login $Registry)" }
-    Write-Info "--- push ${Image}:latest ---"
-    docker push "${Image}:latest"
-    if ($LASTEXITCODE -ne 0) { Write-Fail "docker push latest failed." }
-    Write-Ok "Pushed ${Image}:$Version and ${Image}:latest"
-}
-
 # --- record state ----------------------------------------------------------
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
@@ -162,4 +171,4 @@ Write-Ok "=== Done ==="
 Write-Ok "  image : ${Image}:$Version (+ latest)"
 Write-Ok "  binary: xingmeng/dist/xmd ($binSize, linux/amd64 static)"
 if ($gitRev) { Write-Ok "  commit: $gitRev" }
-if (-not $Push) { Write-Host  "  note  : local only; add -Push -Registry <reg> to publish" -ForegroundColor DarkGray }
+if (-not $Push) { Write-Host  "  note  : run again with -Push to publish this version to Docker Hub" -ForegroundColor DarkGray }
