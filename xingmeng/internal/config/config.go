@@ -47,7 +47,7 @@ type Config struct {
 	}
 	Listeners struct {
 		DataHTTP string `yaml:"data_http"`
-		DataSSH  string `yaml:"data_ssh"` // SFTP 适配未实现，暂不监听
+		DataSSH  string `yaml:"data_ssh"` // SFTP；默认留空不监听（镜像内置 yaml 设 0.0.0.0:9001）
 		Admin    string `yaml:"admin"`
 		Repl     string `yaml:"repl"`
 		Public   string `yaml:"public"` // 公共读面（99-D024）：默认 0.0.0.0:9004，仅认桶公共标志

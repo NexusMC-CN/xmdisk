@@ -25,7 +25,8 @@ curl -s -H "X-Xm-Token: $ADM" $H/status
 ```bash
 # 签发（ttl_hours ∈ [1,24]）
 curl -s -H "X-Xm-Token: $ADM" -XPOST $H/auth/session -d '{"ttl_hours":8}'
-# → {"expires_at":"2026-10-23T22:00:53+08:00","token":"6f2a…hex…"}
+# → {"expires_at":1792723253,"expires_iso":"2026-10-23T22:00:53+08:00","token":"6f2a…hex…"}
+#   （expires_at 为 Unix 秒；expires_iso 为 RFC3339 可读格式）
 
 # 使用（全部业务接口同 X-Xm-Session）
 curl -s -H "X-Xm-Session: 6f2a…hex…" $H/status
@@ -62,8 +63,10 @@ curl -s  -H "X-Xm-Token: $ADM" $H/metrics  # Prometheus 文本
 {"buckets":[{"Name":"wanbkt","Quota":null,"Used":39976976,"Pending":0,"Objects":11,
              "Public":false,"AccessKey":"xm988d5691790c773dcfbc","SecretOK":true}],
  "node":{"role":"master","serve":"rw","epoch":2,"last_seq":18,
-         "sync_running":false,"sync_addr":"","repl_listening":true,
+         "sync_running":false,"repl_listening":true,
          "kek_configured":true,"role_mismatch":true,"public_endpoint":"http://…:9000"}}
+// 从节点另有 "sync_addr"（当前同步主地址，空值省略）与 "configured_role"；
+// 主节点另有 "repl_token_configured"/"repl_token_runtime"/"max_epoch_in_log" 等字段。
 ```
 
 ### 4.2 数据面开关
@@ -91,7 +94,7 @@ curl -s -H "X-Xm-Token: $ADM" -XPOST $H/buckets -d '{"name":"wanbkt","public":fa
 #    "quota":null,"secret":"c56c45daf72a…"}        # ← secret 只出现这一次
 
 curl -s -H "X-Xm-Token: $ADM" -XPOST $H/buckets/wanbkt/rotate
-# → {"access_key":"xm988d5691790c773dcfbc","secret":"<新SK>"}
+# → {"access_key":"xm988d5691790c773dcfbc","bucket":"wanbkt","secret":"<新SK>"}
 
 curl -s -H "X-Xm-Token: $ADM" -XPATCH $H/buckets/wanbkt -d '{"quota":107374182400}'
 ```
@@ -175,10 +178,10 @@ curl -s -H "X-Xm-Token: $ADM" -XPOST http://C:9002/serve -d '{"mode":"rw"}'
 | `xm_node_role` | 1=master 0=slave |
 | `xm_node_serve` | 0=off 1=ro 2=rw |
 | `xm_node_epoch` | 当前 op 代 |
-| `xm_oplog_last_seq` / `xm_oplog_first_seq` | 日志尾/首序号——**两者之差即保留窗口**，first 持续抬高=截断在工作 |
+| `xm_oplog_last_seq` / `xm_oplog_first_seq` | 日志尾/首序号——**两者之差即保留窗口**，first 持续抬高=截断在工作。first_seq 仅在 oplog 非空时输出 |
 | `xm_sync_running` | 从节点同步循环是否运行 |
 | `xm_repl_listening` | 复制面是否监听 |
-| `xm_slave_acked{slave}` / `xm_slave_lag{slave}` / `xm_slave_active{slave}` | 主节点侧各从复制进度/滞后/活跃 |
+| `xm_slave_acked{slave}` / `xm_slave_lag{slave}` / `xm_slave_active{slave}` | 主节点侧各从复制进度/滞后/活跃。无注册从节点时不输出 |
 | `xm_bucket_used_bytes / pending_bytes / objects / public{bucket}` | 桶用量（配额口径） |
 
 ## 7. 错误语义
@@ -190,3 +193,5 @@ curl -s -H "X-Xm-Token: $ADM" -XPOST http://C:9002/serve -d '{"mode":"rw"}'
 ## 8. 变更历史
 
 - 2026-10-23 初版（集群实测轮）：新增 `GET /slaves`、`POST /gc` 联动截断（`TruncatedOps`）、`xm_oplog_first_seq`/`xm_slave_*` 指标；`/sync` stop/start 地址粘性语义明确。
+
+- 2026-10-26 终检校准（Docker Hub v0.1.2 实测）：rotate 响应补 `bucket`；会话响应补 `expires_iso`；/status 主节点示例去掉空 `sync_addr`（omitempty）；指标输出条件注记。
